@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUTF8: "1"
-      CAMERA_TEST_VERSION: 0.2.0-dev
+      CAMERA_TEST_VERSION: 0.2.0-print.2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -4,7 +4,7 @@ Freeze the train mid-trick, fly around it, and frame a photograph with a mouse, 
 
 **Stable v0.1.0** includes the free camera, finder, folder picker, PNG/EXR shutter and offline exporters. The **v0.2.0-dev prerelease** adds metered exposure, Photo Studio, timed captures, film looks, ISO grain and a chromatic aberration switch. Pick the Windows or Linux/Proton ZIP from the version you want and follow the same installation steps below. [Download stable v0.1.0](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.1.0) · [Download the v0.2.0-dev prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.2.0-dev)
 
-The local **0.2.0-print.2** build adds **Spread 89:35** for a 22.25 × 8.75-inch magazine spread. It includes the 1× through 4× capture scale introduced in **0.2.0-print.1**.
+The **v0.2.0-print.2 prerelease** adds **Spread 89:35** for a 22.25 × 8.75-inch magazine spread. Choose **1× through 4×** in Photo Studio to set the saved image resolution. [Download the print prerelease for Windows or Linux/Proton](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.2.0-print.2)
 
 ## Windows installation
 
