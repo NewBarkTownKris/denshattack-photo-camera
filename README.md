@@ -4,6 +4,8 @@ Freeze the train mid-trick, fly around it, and frame a photograph with a mouse, 
 
 **Stable v0.1.0** includes the free camera, finder, folder picker, PNG/EXR shutter and offline exporters. The **v0.2.0-dev prerelease** adds metered exposure, Photo Studio, timed captures, film looks, ISO grain and a chromatic aberration switch. Pick the Windows or Linux/Proton ZIP from the version you want and follow the same installation steps below. [Download stable v0.1.0](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.1.0) · [Download the v0.2.0-dev prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.2.0-dev)
 
+The local **0.2.0-print.1** build adds **F4 → Capture scale** for 1× through 4× print captures. This build has offline test coverage. In-game image quality and GPU memory use at higher scales still need a playtest.
+
 ## Windows installation
 
 1. Download the **windows.zip** asset from the release and extract the entire folder. Install 64-bit Python 3.12 with the Python launcher and Tcl/Tk if you need Python. [Python for Windows](https://www.python.org/downloads/windows/)
@@ -44,7 +46,7 @@ Press **F4** in photo mode. Use **Up/Down** to select a row and **Left/Right** t
 
 The dials cover **f/1–f/16**, **8 s–1/32000 s** and **ISO 100–6400**. Exposure compensation ranges from −5 to +5 EV in thirds of a stop. With Manual exposure, ISO 200 delivers twice the linear signal of ISO 100 at the same aperture and shutter. The meter samples a small HDR rendering of the selected frame. Its virtual calibration assigns EV100 10 to linear 0.18. Once the meter has a reading, the finder shows a **±3 EV scale** above the image, marked in thirds of a stop. Positive meter error means the camera exposes brighter than its target.
 
-At **1/15 s or slower** in a photographic mode, keep moving the camera after pressing the shutter to build a motion exposure. The finder shows the time remaining, then **Developing photo** while it renders the recorded path. The train stays frozen. Focus, focal length and exposure lock for the shot. **F8** cancels a timed exposure and resumes gameplay. The shutter uses up to 64 camera poses and limits the output long edge to 3840 pixels.
+At **1/15 s or slower** in a photographic mode, keep moving the camera after pressing the shutter to build a motion exposure. The finder shows the time remaining, then **Developing photo** while it renders the recorded path. The train stays frozen. Focus, focal length and exposure lock for the shot. **F8** cancels a timed exposure and resumes gameplay. The shutter uses up to 64 camera poses. Its 1× image has a maximum long edge of 3840 pixels.
 
 **Film look** offers eleven presets, including Neutral, Chrome slide, Tungsten negative and Silver print. **ISO grain** adds grain to any look, including Neutral. The effective ISO controls its strength and size. The finder and PNG show the creative grade. F3 writes the EXR from scene color, applying the selected photographic exposure once. The TIFF exporter’s highlight-protection offset is a separate development adjustment.
 
@@ -99,6 +101,25 @@ To isolate the train, choose a longer lens with **F7**, center the subject and t
 In the development finder, **T** enables **AF-C** to keep focusing on the center target while you move. Press **T** again to lock the current distance. With photographic DOF on, the finder reports the distance to the center target and whether to focus nearer or farther. **Aligned** indicates that the target falls within the lens’s sharpness tolerance. An empty center target holds the last focus plane.
 
 The optical finder marks the corners of the active crop and puts a broken ring and focus brackets around its center. The square finder shows open brackets, and the circle finder shows two rings. Press **R** to cycle them. The thirds grid works with any reticle. Guides and readouts stay out of both saved images.
+
+### Capture for print (0.2.0-print.1)
+
+In **F4 → Capture scale**, choose **1×, 2×, 3× or 4×** with Left/Right. The row shows the output dimensions for the selected frame and shutter. The choice applies to the **F9** PNG and both files from **F3**. New and older installations start at **1×**, and the mod remembers the selection for your next session. Scaling applies when the shutter fires.
+
+A **65:24** composition on a **3840 × 2160** viewport gives these print sizes.
+
+| Capture scale | Saved pixels | Inches at 300 pixels per inch |
+| --- | --- | --- |
+| 1× | 3835 × 1416 | 12.8 × 4.7 |
+| 2× | 7670 × 2832 | 25.6 × 9.4 |
+| 3× | 11505 × 4248 | 38.4 × 14.2 |
+| 4× | 15340 × 5664 | 51.1 × 18.9 |
+
+To size for a magazine layout, multiply the placed width and height in inches, including bleed, by the printer’s required pixels per inch. Choose a frame close to that aspect ratio and a scale that meets both dimensions. At 4× the capture contains sixteen times as many pixels as at 1×. A full 15360 × 8640 photographic EXR takes about **1.6 GB** before any TIFF or DNG exports.
+
+For an instant capture, each dimension of the full viewport multiplied by the scale must fit within **16384 pixels**, including when the saved frame uses only part of the view. Timed exposures scale their 1× frame up to a **15360-pixel** long edge at 4×. Available GPU memory can limit what your system can render.
+
+Large EXRs and timed shots render in overlapping horizontal bands. The overlap gives edge filters neighboring pixels. Wide bloom, screen-space effects and animation may still vary between bands. During a scaled instant F3 shot, the finder shows **Developing EXR** after the PNG is saved. **F8** then keeps the PNG and cancels the EXR.
 
 ### Choose where to save
 
@@ -161,6 +182,6 @@ Close the game. On Windows, run `py -3 windows/photo_camera.py remove` from the 
 
 ## Development
 
-Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build both development archives and the checksum manifest with `python3 tools/package_release.py --version 0.2.0-dev --output dist/0.2.0-dev`. The implementation plan tracks remaining reference features and validation work. [Implementation plan for this prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/blob/v0.2.0-dev/IMPLEMENTATION_PLAN.md)
+Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build the local Windows and Linux/Proton print archives and their checksum manifest with `python3 tools/package_release.py --version 0.2.0-print.1 --output dist/0.2.0-print.1`.
 
 The viewfinder and photographic controls were inspired by technicallyalex’s [VHOLUME Photo Camera](https://github.com/technicallyalex/vholume-photo-camera). This independent fan mod is distributed under the [MIT license](LICENSE).

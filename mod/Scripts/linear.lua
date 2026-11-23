@@ -4,6 +4,9 @@ local linear = {}
 local folder = assert(debug.getinfo(1, "S").source:match("^@(.+[/\\])"))
 local fallback = dofile(folder .. "exrfallback.lua")
 local magic = "\118\047\049\001" .. string.pack("<I4", 2)
+local nativePixels = 3840 * 2160
+local bandPixels = 1024 * 1024
+local overlap = 64
 
 local function valid(o)
     return o and o:IsValid()
@@ -126,7 +129,8 @@ end
 -- Strip unused alpha and guard columns. Bound the more expensive FLOAT
 -- conversion to a band per poll, keeping the game thread responsive at 4K.
 local function publishRGB(tx, request)
-    local w, h = request.crop.w, request.crop.h
+    local output = request.output or request.crop
+    local w, h = output.w, output.h
     local f <close> = assert(io.open(tx.source, "rb"), "Unreal did not produce the EXR")
     if not tx.writeRow then
         tx.channels, tx.pixelType = header(f, tx.renderWidth, h)
@@ -143,7 +147,8 @@ local function publishRGB(tx, request)
     local out <close> = assert(io.open(tx.partial, "ab"))
     local bytes = tx.pixelType == 1 and 2 or 4
     local planeSize = tx.renderWidth * bytes
-    local stop = tx.exposure and math.min(h, tx.writeRow + math.max(1, 262144 // w)) or h
+    local budget = tx.exposure and 262144 or 2097152
+    local stop = math.min(h, tx.writeRow + math.max(1, budget // w))
     for y = tx.writeRow, stop-1 do
         assert(f:seek("set", string.unpack("<I8", tx.indices, y * 8 + 1)))
         local line, size = string.unpack("<i4I4", readExact(f, 8))
@@ -168,8 +173,7 @@ end
 
 -- Use the active game's projection at the selected crop boundaries. This
 -- handles the project's axis constraint, including portrait and native gates.
-local function projection(session, crop, library, renderWidth, left, outputWidth, outputHeight)
-    outputWidth, outputHeight = outputWidth or crop.w, outputHeight or crop.h
+local function gateTangent(session, crop)
     local y = crop.y + crop.h / 2
     local function ray(x)
         local direction = {}
@@ -181,18 +185,29 @@ local function projection(session, crop, library, renderWidth, left, outputWidth
     local dot = a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
     local fov = math.deg(math.acos(math.max(-1, math.min(1, dot))))
     assert(fov > 0 and fov < 180, "Invalid viewfinder field of view")
+    return math.tan(math.rad(fov)/2)
+end
+
+local function bandProjection(gate, library, renderWidth, left, outputWidth, outputHeight, bandY, bandHeight)
     -- Extend the frustum by one original pixel footprint per guard column.
     -- For an odd guard count, shift the principal point by half a pixel so
     -- each retained texel still represents the same viewfinder ray.
-    local tangent = math.tan(math.rad(fov) / 2) * renderWidth / outputWidth
+    local tangent = gate * renderWidth / outputWidth
     local paddedFov = math.deg(2 * math.atan(tangent))
     local right = renderWidth - outputWidth - left
-    local view = {FOV=paddedFov, AspectRatio=renderWidth/outputHeight, ProjectionMode=0,
-        OffCenterProjectionOffset={X=(right-left)/renderWidth, Y=0}}
-    return library:CalculateProjectionMatrix(view), paddedFov
+    local view = {FOV=paddedFov, AspectRatio=renderWidth/bandHeight, ProjectionMode=0,
+        OffCenterProjectionOffset={X=(right-left)/renderWidth, Y=(outputHeight-2*bandY-bandHeight)/bandHeight}}
+    -- A custom projection can coexist with a centered frustum used for
+    -- component culling. Keep the latter wide enough to cover the whole gate.
+    local cullingFov = bandHeight == outputHeight and paddedFov
+        or math.min(179.99, math.deg(2 * math.atan(tangent * outputHeight / bandHeight)))
+    return library:CalculateProjectionMatrix(view), cullingFov
 end
 
-linear.projection = projection
+function linear.projection(session, crop, library, renderWidth, left, outputWidth, outputHeight, bandY, bandHeight)
+    return bandProjection(gateTangent(session,crop), library, renderWidth, left, outputWidth or crop.w,
+        outputHeight or crop.h, bandY or 0, bandHeight or outputHeight or crop.h)
+end
 
 -- UE4SS serializes struct arguments with the exact display spelling of
 -- reflected names. A project's cooked FName casing may differ from the SDK.
@@ -232,7 +247,17 @@ function linear.cancel(request)
     return true
 end
 
-local function capture(session, request, supplied, renderWidth, left, samples, divisor)
+local function submitBand(tx, firstRow)
+    local start = math.min(math.max(0, firstRow - overlap), tx.height - tx.renderHeight)
+    local matrix, fov = bandProjection(tx.gate, tx.library, tx.renderWidth, tx.left,
+        tx.width, tx.height, start, tx.renderHeight)
+    tx.band = {target=tx.target, left=tx.left, first=firstRow,
+        rows=math.min(tx.bandRows, tx.height-firstRow), sourceY=firstRow-start}
+    tx.component.CustomProjectionMatrix, tx.component.FOVAngle = matrix, fov
+    tx.component:CaptureScene()
+end
+
+local function capture(session, request, supplied, renderWidth, left, samples, divisor, externalBands)
     local path, crop = request.path, request.crop
     if not path or not path:match("%.exr$") then return false, "Expected an EXR path" end
     local source, partial = path:sub(1, -5) .. ".source.exr", path .. ".partial"
@@ -242,12 +267,24 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
     tx.gain = (exposure and exposure.gain or 1) / (divisor or 1)
     request.linearJob = tx
     local ok, issue = pcall(function()
-        local w, h = crop.w, crop.h
-        assert(math.tointeger(w) and w > 0 and math.tointeger(h) and h > 0, "Invalid EXR dimensions")
+        local output = request.output or crop
+        local w, h = output.w, output.h
+        assert(math.tointeger(w) and w >= 1 and w <= 16384 and math.tointeger(h) and h >= 1 and h <= 16384,
+            "EXR dimensions must be between 1 and 16384 pixels per axis")
+        tx.width, tx.height = w, h
         tx.chroma = colorSpace()
         tx.library = object("/Script/Engine.Default__KismetRenderingLibrary")
-        tx.writer = object("/Script/ImageWriteQueue.Default__ImageWriteBlueprintLibrary")
-        tx.options = linear.writeOptions(3)
+        if externalBands then tx.externalBands = true; return end
+        if not supplied and w*h > nativePixels and (w > crop.w or h > crop.h) then
+            -- Keep one strip of the image on the GPU. Overscan on each side
+            -- gives neighboring rows to the renderer before cropping.
+            tx.bandRows = math.max(1, bandPixels // w)
+            tx.renderHeight = math.min(h, tx.bandRows + 2*overlap)
+        else
+            tx.writer = object("/Script/ImageWriteQueue.Default__ImageWriteBlueprintLibrary")
+            tx.options = linear.writeOptions(3)
+            tx.renderHeight = h
+        end
         -- DX12 staging rows are 256-byte aligned. RGBA16F is eight bytes per
         -- texel, so a 32-texel multiple gives the writer tightly packed rows.
         tx.renderWidth = ((w + 31) // 32) * 32
@@ -258,7 +295,6 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
             tx.target, tx.renderWidth, tx.left, tx.borrowed = supplied, renderWidth, left, true
             return
         end
-        local matrix, fov = projection(session, crop, tx.library, tx.renderWidth, tx.left)
         local p = session.pose
         tx.actor = session.world:SpawnActor(object("/Script/Engine.SceneCapture2D"),
             {X=p.x, Y=p.y, Z=p.z}, {Pitch=p.pitch, Yaw=p.yaw, Roll=p.roll})
@@ -270,12 +306,20 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
         local k, r = session.locationKeys, session.angleKeys
         assert(tx.actor:K2_SetActorLocationAndRotation({[k.x]=p.x, [k.y]=p.y, [k.z]=p.z},
             {[r.pitch]=p.pitch, [r.yaw]=p.yaw, [r.roll]=p.roll}, false, {}, true), "Could not position EXR camera")
-        tx.target = tx.library:CreateRenderTarget2D(session.world, tx.renderWidth, h, 6, {R=0,G=0,B=0,A=0}, false, false)
+        tx.target = tx.library:CreateRenderTarget2D(session.world, tx.renderWidth, tx.renderHeight, 6, {R=0,G=0,B=0,A=0}, false, false)
         assert(valid(tx.target), "Could not create RGBA16f render target")
+        assert(tx.target.SizeX == tx.renderWidth and tx.target.SizeY == tx.renderHeight, "Unreal resized the EXR render target")
         tx.target.TargetGamma = 1
-        component.FOVAngle, component.CustomProjectionMatrix, component.bUseCustomProjectionMatrix = fov, matrix, true
+        component.bUseCustomProjectionMatrix = true
         component.CaptureSource, component.TextureTarget = 1, tx.target -- SCS_SceneColorHDRNoAlpha
-        component:CaptureScene()
+        if tx.bandRows then
+            tx.component, tx.gate = component, gateTangent(session, crop)
+            submitBand(tx, 0)
+        else
+            local matrix, fov = linear.projection(session, crop, tx.library, tx.renderWidth, tx.left, w, h)
+            component.FOVAngle, component.CustomProjectionMatrix = fov, matrix
+            component:CaptureScene()
+        end
     end)
     if not ok then
         local _, cleanup = linear.cancel(request)
@@ -293,12 +337,76 @@ function linear.fromTarget(session, request, target, width, left, samples, divis
     return capture(session, request, target, width, left, samples, divisor)
 end
 
+-- Timed exposures keep their accumulator alive until every retained row of
+-- the current band has been read. Only the EXR staging file belongs to us.
+function linear.beginBands(session, request, samples, divisor)
+    return capture(session, request, nil, nil, nil, samples, divisor, true)
+end
+
+function linear.writeBand(request, target, left, firstRow, rowCount, sourceY)
+    local tx = request.linearJob
+    local ok, done = pcall(function()
+        assert(tx and tx.externalBands and valid(target), "Missing EXR band or accumulator")
+        assert(math.tointeger(firstRow) and math.tointeger(rowCount) and firstRow >= 0 and rowCount > 0
+            and firstRow + rowCount <= tx.height, "Invalid EXR band bounds")
+        assert(math.tointeger(sourceY) and math.tointeger(left) and sourceY >= 0 and left >= 0
+            and sourceY + rowCount <= target.SizeY and left + tx.width <= target.SizeX, "EXR band exceeds its source")
+        if not tx.band then
+            assert(firstRow == (tx.fallbackRow or 0), "Out-of-order EXR band")
+            tx.band = {target=target, left=left, first=firstRow, rows=rowCount, sourceY=sourceY}
+        else
+            assert(tx.band.first == firstRow and tx.band.rows == rowCount and tx.band.sourceY == sourceY
+                and tx.band.left == left and tx.band.target == target, "EXR band changed before readback finished")
+        end
+        if fallback.step(tx, request, rgbHeader, tx.band) then tx.band = nil; return true end
+        return false
+    end)
+    if not ok then return false, tostring(done) end
+    return done
+end
+
+local function verifyFile(path, request)
+    local f <close> = assert(io.open(path, "rb"))
+    local output = request.output or request.crop
+    local w, h = output.w, output.h
+    local channels, sampleType = header(f, w, h)
+    assert(channels == "BGR", "Expected RGB EXR")
+    local endOfHeader = assert(f:seek())
+    assert(f:seek("end") == endOfHeader + h * (16 + w * (sampleType == 1 and 6 or 12)), "Incomplete RGB EXR")
+end
+
+local function publish(request, tx)
+    verifyFile(tx.partial, request)
+    assert(not exists(request.path), "EXR filename is already in use")
+    assert(os.rename(tx.partial, request.path))
+    local cleaned, why = linear.cancel(request)
+    assert(cleaned, why)
+end
+
+function linear.finishBands(request)
+    local ok, why = pcall(function()
+        local tx = request.linearJob
+        assert(tx and tx.externalBands and not tx.band and tx.fallbackRow == tx.height, "Incomplete EXR bands")
+        publish(request, tx)
+    end)
+    if not ok then return false, tostring(why) end
+    return true
+end
+
 function linear.checkFile(request, now)
     local tx = request.linearJob
     if tx then
         now = now or os.clock()
-        local previousRow, previousWrite = tx.fallbackRow, tx.writeRow
+        local previousRow, previousWrite, previousSize = tx.fallbackRow, tx.writeRow, tx.lastSize
         local ok, err = pcall(function()
+            if tx.externalBands then return end
+            if tx.band then
+                if fallback.step(tx, request, rgbHeader, tx.band) then
+                    if tx.fallbackRow == tx.height then publish(request, tx)
+                    else submitBand(tx, tx.fallbackRow) end
+                end
+                return
+            end
             if not tx.submittedAt then
                 -- CaptureScene queues the render. Keep the actor and target
                 -- alive across an engine frame before requesting GPU readback.
@@ -310,7 +418,6 @@ function linear.checkFile(request, now)
                 tx.submittedAt = now
                 return
             end
-            local w, h = request.crop.w, request.crop.h
             if tx.fallbackRow or not exists(tx.source) then
                 if now - tx.submittedAt < 2 then return end
                 if not tx.fallbackRow then
@@ -324,25 +431,18 @@ function linear.checkFile(request, now)
                 f:close()
                 if not publishRGB(tx, request) then return end
             end
-            assert(os.rename(tx.partial, request.path))
-            local cleaned, why = linear.cancel(request)
-            assert(cleaned, why)
+            publish(request, tx)
         end)
         if not ok then
             local _, cleanup = linear.cancel(request)
             return false, tostring(err) .. (cleanup and " / " .. cleanup or "")
         end
-        if request.linearJob then return false, nil, previousRow ~= tx.fallbackRow or previousWrite ~= tx.writeRow end
+        if request.linearJob then
+            return false, nil, previousRow ~= tx.fallbackRow or previousWrite ~= tx.writeRow or previousSize ~= tx.lastSize
+        end
     end
     if not exists(request.path) then return false end
-    local ok, err = pcall(function()
-        local f <close> = assert(io.open(request.path, "rb"))
-        local w, h = request.crop.w, request.crop.h
-        local channels, sampleType = header(f, w, h)
-        assert(channels == "BGR", "Expected RGB EXR")
-        local endOfHeader = assert(f:seek())
-        assert(f:seek("end") == endOfHeader + h * (16 + w * (sampleType == 1 and 6 or 12)), "Incomplete RGB EXR")
-    end)
+    local ok, err = pcall(verifyFile, request.path, request)
     if not ok then return false, tostring(err) end
     return true
 end

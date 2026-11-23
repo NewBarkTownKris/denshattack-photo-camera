@@ -9,7 +9,8 @@ local controls = {
 }
 local filmControls = {chromatic=true, look=true, grain=true}
 local cameraRows = {
-    {"frame", "Frame", "index"}, {"orientation", "Orientation", "boolean"}, {"lens", "Lens", "index"},
+    {"frame", "Frame", "index"}, {"orientation", "Orientation", "boolean"},
+    {"captureScale", "Capture scale", "scale"}, {"lens", "Lens", "index"},
     {"dof", "Depth of field", "boolean"}, {"strength", "DOF multiplier", "index"}, {"focusMode", "Focus mode"},
     {"reticle", "Reticle", "index"}, {"grid", "Thirds grid", "boolean"}, {"folder", "Screenshot folder"},
 }
@@ -38,7 +39,10 @@ local function parse(path)
     local selected, film, camera = {}, {}, {}
     for key, value in data:gmatch("([%w]+)=([^\n]+)\n") do
         if cameraFields[key] then
-            if cameraFields[key] == "index" then
+            if cameraFields[key] == "scale" then
+                local scale = math.tointeger(tonumber(value))
+                if scale and scale >= 1 and scale <= 4 then camera[key] = scale end
+            elseif cameraFields[key] == "index" then
                 local index = math.tointeger(tonumber(value))
                 if index and index >= 0 then camera[key] = index end
             elseif cameraFields[key] == "boolean" and (value == "true" or value == "false") then

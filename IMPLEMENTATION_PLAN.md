@@ -24,7 +24,7 @@ The Steam app manifest and shipping executable identify the tested build. Tests 
 
 Same-pose PNGs in **9-2-B To the Moon** verified changing the speed effects and shifting focus between the train and the background. Landscape, portrait and 65:24 shots confirmed the output dimensions. A 4K EXR retained scene values above 500, and a real floating-point DNG opened in darktable.
 
-## Development branch
+## Photo Studio v0.2.0-dev
 
 | Feature | Current behavior |
 | --- | --- |
@@ -43,6 +43,12 @@ Live Proton checks on a frozen composition yielded these results.
 - The mouse wheel changed shutter speed from 1/125 to 1/160 s, ISO from 200 to 250, and aperture from f/4 to f/3.5 with the respective modifiers. Middle-click locked focus at 10.75 m and left-click saved a PNG.
 
 Automated tests cover exposure stops, Auto ISO bounds, focus/DOF, cropped metering, timing, cancel/cleanup and settings restoration. [Exposure and Photo Studio](README.md#photo-studio-development-build)
+
+## Print capture in 0.2.0-print.1
+
+The local build adds a saved **Capture scale** dial to Photo Studio. The dial scales both dimensions of the selected frame by 1×, 2×, 3× or 4× for PNG and scene-linear EXR. Composition and metering use the original finder gate. The scaled full viewport for an instant shutter is limited to 16384 pixels per axis. Timed shutters scale their 3840-long-edge maximum base to a maximum of 15360 pixels at 4×.
+
+Validation for this build is offline. A later in-game test should compare fine rail edges at 1× and 4× from the same frozen camera, check alignment of the PNG and EXR in portrait and panoramic frames, and measure capture time and GPU memory at the largest size. The live results above apply to the earlier prerelease. [Print sizing and controls](README.md#capture-for-print-020-print1)
 
 ## Differences from the VHOLUME reference
 

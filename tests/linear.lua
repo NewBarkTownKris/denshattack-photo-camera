@@ -45,7 +45,7 @@ for _, o in pairs(objects) do o.IsValid = valid end
 actor.IsValid, target.IsValid, component.IsValid = valid, valid, valid
 function StaticFindObject(k) return assert(objects[k]) end
 function pc:DeprojectScreenPositionToWorld(x,y,origin,ray)
-    assert(y == req.crop.y + height/2 and (x == req.crop.x or x == req.crop.x+width))
+    assert(y == req.crop.y + req.crop.h/2 and (x == req.crop.x or x == req.crop.x+req.crop.w))
     ray.X, ray.Y, ray.Z = math.sqrt(0.5), x == req.crop.x and -math.sqrt(0.5) or math.sqrt(0.5), 0
     return true
 end
@@ -54,8 +54,8 @@ function actor:GetComponentByClass() return component end
 function actor:K2_SetActorLocationAndRotation(pos, rot) assert(pos.X==5 and rot.pitch==24); return true end
 function actor:K2_DestroyActor() self.destroyed=true end
 function library:CreateRenderTarget2D(wld,w,h,fmt,_,mip,uav)
-    assert(wld==world and w%32==0 and w>=width and w-width<32 and h==height and fmt==6 and not mip and not uav)
-    target.width = w
+    assert(wld==world and w%32==0 and w>=width and w-width<32 and h<=height and fmt==6 and not mip and not uav)
+    target.width, target.SizeX, target.SizeY = w, w, h
     return target
 end
 function library:ReadRenderTargetRawPixel(wld, rt, x, y, normalize)
@@ -63,8 +63,9 @@ function library:ReadRenderTargetRawPixel(wld, rt, x, y, normalize)
 end
 function library:ReleaseRenderTarget2D(rt) assert(rt==target); target.released=true end
 function library:CalculateProjectionMatrix(info)
-    local padded = info.AspectRatio * height
-    local left = (padded-width) // 2
+    local padded = ((width+31)//32)*32
+    local renderHeight = padded/info.AspectRatio
+    local left = (padded-width)//2
     local half = math.tan(math.rad(info.FOV)/2)
     -- For a 90-degree initial horizontal FOV, the desired ray slopes are
     -- -1..1. Integer crop boundaries and pixel centers must both agree.
@@ -73,7 +74,13 @@ function library:CalculateProjectionMatrix(info)
         local slope = (ndc + info.OffCenterProjectionOffset.X)*half
         assert(math.abs(slope - (2*x/width-1)) < 1e-7)
     end
-    assert(info.OffCenterProjectionOffset.Y==0 and math.abs(half/info.AspectRatio-height/width)<1e-7)
+    assert(math.abs(half/info.AspectRatio-renderHeight/width)<1e-7)
+    local top = (height-renderHeight-info.OffCenterProjectionOffset.Y*renderHeight)/2
+    for _, y in ipairs({0, 0.5, renderHeight-0.5, renderHeight}) do
+        local slope = (1-2*y/renderHeight+info.OffCenterProjectionOffset.Y)*half/info.AspectRatio
+        assert(math.abs(slope-(height-2*(top+y))/width)<1e-7)
+    end
+    target.bandStart = top
     return {calculated=true}
 end
 function component:CaptureScene()
@@ -176,3 +183,84 @@ function writer:ExportToDisk(rt,file) mockEXR(file,false,rt.width) end
 actor.destroyed,target.released=false,false
 assert(capture()); verifyExposed(); os.remove(req.path)
 print("Photographic FLOAT EXR gain and metadata match across both render readback paths.")
+
+-- The screen-space box stays fixed as the image gains pixels. Exercise the
+-- actual EXR native export and raw fallback on a tiny 4x portrait fixture.
+req.crop = {x=7, y=13, w=3, h=5}
+width, height = req.crop.w*4, req.crop.h*4
+req.output = {w=width, h=height}
+actor.destroyed, target.released = false, false
+assert(capture()); verifyExposed()
+assert(not linear.checkFile({path=req.path,crop=req.crop}), "A 4x shot must not verify at viewport dimensions")
+os.remove(req.path)
+function writer:ExportToDisk() end
+assert(linear.capture(s,req))
+assert(not linear.checkFile(req,1)); assert(linear.checkFile(req,3.1)); verifyExposed()
+os.remove(req.path)
+
+-- A full 4K viewport shot at 4x should allocate only one overlapping strip.
+-- Sample into the second strip, checking crop geometry and cancel cleanup
+-- without allocating or writing a full 1.5 GiB print master in this test.
+width, height = 15360, 8640
+req.crop, req.output = {x=0,y=0,w=3840,h=2160}, {w=width,h=height}
+assert(linear.capture(s, req))
+local tx = req.linearJob
+assert(target.SizeX == width and target.SizeY < 256 and tx.band and target.bandStart == 0)
+assert(not tx.writer and not io.open(tx.source,"rb"))
+local expectedRow, color = 0, {R=4,G=1,B=0.5}
+function library:ReadRenderTargetRawPixelArea(_,rt,left,y,w,rows,normalized)
+    assert(rt==target and left==0 and w==width and not normalized)
+    assert(math.abs(target.bandStart+y-expectedRow)<1e-5 and y+rows<=target.SizeY and w*rows<=65536)
+    expectedRow = expectedRow+rows
+    local pixels = {}
+    for i=1,w*rows do pixels[i] = color end
+    return pixels
+end
+while expectedRow <= tx.bandRows do
+    local done, why, advanced = linear.checkFile(req)
+    assert(not done and not why and advanced)
+end
+assert(target.bandStart>0 and target.bandStart<=tx.band.first-64)
+assert(linear.cancel(req) and not io.open(req.path..".partial","rb"))
+req.output = {w=16385,h=400}
+assert(not linear.capture(s,req) and not req.linearJob)
+
+-- Stream a borrowed timed accumulation from disjoint source rectangles. Each
+-- read sees local band coordinates; output scanline numbers remain global.
+width, height = 12, 8
+req.crop, req.output = {x=7,y=6,w=3,h=2}, {w=width,h=height}
+local accumulator = {IsValid=valid, SizeX=32, SizeY=9}
+local sourceY, destY = 0, 0
+function library:ReadRenderTargetRawPixelArea(_,rt,x,y,w,rows,normalized)
+    assert(rt==accumulator and x==3 and y==sourceY and w==width and not normalized)
+    local pixels = {}
+    for row=0,rows-1 do
+        for col=1,w do pixels[#pixels+1] = {R=col,G=row+destY,B=-0.5} end
+    end
+    return pixels
+end
+assert(linear.beginBands(s,req,3,3))
+assert(not linear.finishBands(req))
+assert(not linear.writeBand(req,accumulator,3,1,3,1))
+sourceY, destY = 2, 0
+assert(linear.writeBand(req,accumulator,3,0,3,sourceY))
+sourceY, destY = 1, 3
+assert(linear.writeBand(req,accumulator,3,3,5,sourceY))
+assert(linear.finishBands(req) and linear.checkFile(req))
+do
+    local f <close> = assert(io.open(req.path,"rb"))
+    local data = f:read("a")
+    assert(data:find(attr("denshShutterSamples","int",string.pack("<i4",3)),1,true))
+    local start = #data-height*(8+12*width)+1
+    for y=0,height-1 do
+        local pos = start+y*(8+12*width)
+        local line, size = string.unpack("<i4I4",data,pos)
+        assert(line==y and size==12*width)
+        local function near(offset,value)
+            assert(math.abs(string.unpack("<f",data, pos+8+offset)-value*req.exposure.gain/3)<0.05)
+        end
+        near(0,-0.5); near(width*4,y); near(width*8,1); near(width*12-4,width)
+    end
+end
+os.remove(req.path)
+print("4x EXR dimensions, fixed finder rays, bounded off-axis strips and assembled FLOAT scanlines passed.")

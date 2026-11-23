@@ -66,6 +66,7 @@ function world:SpawnActor(_, xyz, angle)
 end
 
 local screenshotCommand, mounted
+local viewportWidth, viewportHeight = 1920, 1080
 local env = setmetatable({
     FindFirstOf = function(name) assert(name == "GameEngine") return engine end,
     FindAllOf = function(name) assert(name == "UserWidget") return {visible, nested, collapsed} end,
@@ -78,7 +79,7 @@ local env = setmetatable({
             end})
         end
         if path == "/Script/UMG.Default__WidgetLayoutLibrary" then
-            return object({GetViewportSize = function() return {X=1920, Y=1080} end})
+            return object({GetViewportSize = function() return {X=viewportWidth, Y=viewportHeight} end})
         end
         if path == "/Script/Engine.Default__KismetSystemLibrary" then
             return object({ExecuteConsoleCommand = function(_, _, cmd) screenshotCommand = cmd end})
@@ -138,6 +139,20 @@ contents = second .. "\n/media/new drive\n"
 assert(adapter.screenshotDir(session) == saved .. "/DenshattackPhotoFolders/" .. second)
 assert(adapter.capture(session, request))
 assert(screenshotCommand:find(request.path, 1, true), "finish an in-flight shot in its original folder")
+viewportWidth, viewportHeight = 3840, 2160
+request.viewport = {w=3840, h=2160}
+request.crop = {x=2, y=372, w=3835, h=1416}
+request.stagedPNG = dir .. "/.portrait.print.png"
+for scale = 1, 4 do
+    request.scale = scale
+    assert(adapter.capture(session, request))
+    local backing = scale == 1 and "1" or ("%dx%d"):format(3840 * scale, 2160 * scale)
+    assert(screenshotCommand == ('HighResShot filename="%s" %s %d %d %d %d 0 0 0 0'):format(
+        request.stagedPNG, backing, 2*scale, 372*scale, 3835*scale, 1416*scale))
+    assert(request.width == 3835*scale and request.height == 1416*scale)
+end
+viewportWidth = 1920
+assert(not adapter.capture(session, request), "a resized window cannot reinterpret the original crop")
 mounted = false
 assert(not adapter.screenshotDir(session))
 contents = "../elsewhere\n/home/test\n"

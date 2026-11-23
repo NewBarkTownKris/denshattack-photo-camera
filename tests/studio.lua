@@ -130,7 +130,8 @@ local restores, folders = 0, 0
 local camera = {
     options=function(s) return s.camera end,
     values=function(s) return {lens=s.camera.lens == 0 and "Game FOV" or "16 mm",
-        focusMode=s.camera.focusMode, grid=s.camera.grid and "On" or "Off"} end,
+        focusMode=s.camera.focusMode, grid=s.camera.grid and "On" or "Off",
+        captureScale=("%d× %d×%d"):format(s.camera.captureScale, 3835*s.camera.captureScale, 1416*s.camera.captureScale)} end,
     adjust=function(s, field, delta)
         if field == "folder" then folders = folders + 1
         elseif field == "focusMode" then s.camera.focusMode = "AF-C"
@@ -145,13 +146,20 @@ local camera = {
 }
 local function composed()
     local sess = session()
-    sess.camera={lens=0, frame=1, orientation=false, dof=false, strength=1, grid=false, reticle=1, focusMode="Manual"}
+    sess.camera={lens=0, frame=1, orientation=false, dof=false, strength=1, grid=false, reticle=1,
+        focusMode="Manual", captureScale=1}
     assert(studio.open(sess, exposure, film, file, camera))
     studio.toggle(sess)
     return sess
 end
 local comp = composed()
 assert(restores==0 and not read())
+assert(selectRow(comp, "Capture scale").value == "1× 3835×1416")
+for scale = 2,4 do
+    studio.adjust(comp, 1)
+    assert(selectRow(comp, "Capture scale").value == ("%d× %d×%d"):format(scale, 3835*scale, 1416*scale))
+    assert(read():find("captureScale=" .. scale .. "\n", 1, true))
+end
 assert(selectRow(comp, "Lens").value == "Game FOV")
 studio.adjust(comp, 1)
 assert(selectRow(comp, "Lens").value == "16 mm")
@@ -165,6 +173,17 @@ assert(folders==1 and not compData:find("focusMode") and not compData:find("fold
 local nextComp = composed()
 assert(restores==1 and nextComp.camera.lens==1 and nextComp.camera.grid)
 assert(nextComp.camera.focusMode=="Manual" and nextComp.camera.orientation==false)
+assert(nextComp.camera.captureScale == 4)
+selectRow(nextComp, "Capture scale"); studio.adjust(nextComp, -1)
+assert(composed().camera.captureScale == 3)
+-- Old and malformed settings leave the 1x default and preserve the other dials.
+for _, entry in ipairs({"", "captureScale=0\n", "captureScale=5\n", "captureScale=1.5\n", "captureScale=large\n"}) do
+    local legacy = assert(io.open(file, "wb"))
+    legacy:write("version=1\n", entry, "lens=1\nend=1\n")
+    legacy:close()
+    local loaded = composed()
+    assert(loaded.camera.captureScale == 1 and loaded.camera.lens == 1)
+end
 os.remove(file)
 os.remove(file .. ".bak")
-print("Photo Studio navigation, priority controls, meter readout, film selection and persisted dials passed.")
+print("Photo Studio navigation, priority controls, meter readout, film selection and saved capture scales passed.")

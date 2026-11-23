@@ -342,16 +342,24 @@ function unreal.capture(session, request)
         assert(type(filename) == "string" and filename:match("^[%w_%-]+%.png$"), "Invalid photo filename")
         local width, height = unreal.viewport(session)
         assert(width, height)
+        assert(not request.viewport or (request.viewport.w == width and request.viewport.h == height),
+            "Viewport changed during capture. Reframe and press the shutter again")
         local crop = request.crop or {x = 0, y = 0, w = width, h = height}
         assert(math.tointeger(crop.x) and math.tointeger(crop.y) and math.tointeger(crop.w)
             and math.tointeger(crop.h) and crop.x >= 0 and crop.y >= 0 and crop.w >= 1 and crop.h >= 1
             and crop.x + crop.w <= width and crop.y + crop.h <= height, "Invalid photo crop")
         local path = request.path
         assert(type(path) == "string" and path:sub(-#filename - 1) == "/" .. filename, "Invalid photo path")
+        path = request.stagedPNG or path
         assert(not path:find('[%c"|]'), "Unreal cannot quote the screenshot path")
-        request.width, request.height = crop.w, crop.h
-        local command = string.format('HighResShot filename="%s" 1 %d %d %d %d 0 0 0 0',
-            path, crop.x, crop.y, crop.w, crop.h)
+        local scale = request.scale or 1
+        assert(math.type(scale) == "integer" and scale >= 1 and scale <= 4, "Invalid PNG capture scale")
+        request.width, request.height = crop.w * scale, crop.h * scale
+        -- An explicit backing raster keeps the engine's resolution multiplier
+        -- at one. The capture rectangle is expressed in that raster's pixels.
+        local resolution = scale == 1 and "1" or ("%dx%d"):format(width * scale, height * scale)
+        local command = string.format('HighResShot filename="%s" %s %d %d %d %d 0 0 0 0',
+            path, resolution, crop.x * scale, crop.y * scale, request.width, request.height)
         object("/Script/Engine.Default__KismetSystemLibrary"):ExecuteConsoleCommand(session.pc, command, session.pc)
         return request
     end)

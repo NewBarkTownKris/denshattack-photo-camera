@@ -11,9 +11,18 @@ for _, size in ipairs({{3840, 2160}, {3440, 1440}, {1281, 801}}) do
             assert(c.x >= 0 and c.y >= 0)
             assert(math.abs(size[1] - c.w - 2 * c.x) <= 1)
             assert(math.abs(size[2] - c.h - 2 * c.y) <= 1)
+            for scale = 1, 4 do
+                local output = photo.output(c, scale, false)
+                assert(output.w == scale * c.w and output.h == scale * c.h)
+            end
         end
     end
 end
+local panorama = photo.output(photo.crop(3840,2160,65,24), 4, false)
+assert(panorama.w == 15340 and panorama.h == 5664)
+local big = {w=7680, h=4320}
+assert(photo.output(big, 4, true).w == 15360 and photo.output(big, 4, true).h == 8640)
+for _, invalid in ipairs({0, 5, 2.5}) do assert(not pcall(photo.output, big, invalid, true)) end
 
 local pose = {x=0, y=0, z=0, pitch=0, yaw=90, roll=0, fov=90}
 local axes = {forward=1, right=0, up=0, pitch=0, yaw=0, roll=0, zoom=0, speed=1}
@@ -55,6 +64,7 @@ local exrCalls, exrSaves = 0, 0
 local exposureShot = {mode="Game", iso=100}
 local motionSteps, motionCancelled, motionRequest = 0, 0, nil
 local pickerRequests, pickerError, displayDir = 0, nil, nil
+local currentSession, viewWidth, viewHeight = nil, 1920, 1080
 local finder = {
     reticles = {"optical", "square", "circle", "off"},
     open = function() return {} end,
@@ -63,10 +73,10 @@ local finder = {
     close = function() finderShown = false; finderClosed = true; return true end,
 }
 local ue = {
-    open = function() opens = opens + 1; return {pose=pose, pc={}} end,
+    open = function() opens = opens + 1; currentSession = {pose=pose, pc={}}; return currentSession end,
     alive = function() return alive end, time = function() return clock end,
     close = function() closes = closes + 1; return true end,
-    viewport = function() return 1920, 1080 end,
+    viewport = function() return viewWidth, viewHeight end,
     screenshotDir = function() return "/tmp", nil, displayDir end,
     requestDirectoryPicker = function()
         pickerRequests = pickerRequests + 1
@@ -167,9 +177,9 @@ assert(closes == 0, "must hold the photographic view during a pending write")
 
 -- Simulate the signature, dimensions and final chunk observed by the polling
 -- code. An incomplete write must leave the pending request in place.
-local function writeHeader(width, withEnd)
-    local f = assert(io.open(imagePath, "wb"))
-    f:write("\137PNG\r\n\26\n", string.pack(">I4", 13), "IHDR", string.pack(">I4I4", width, 1080))
+local function writeHeader(width, withEnd, path, height)
+    local f = assert(io.open(path or imagePath, "wb"))
+    f:write("\137PNG\r\n\26\n", string.pack(">I4", 13), "IHDR", string.pack(">I4I4", width, height or 1080))
     if withEnd then f:write("\0\0\0\0IEND\174\66\96\130") end
     f:close()
 end
@@ -212,4 +222,35 @@ clock = 20.2; tick(0.01, axes); clock = 20.3; tick(0.01, axes)
 assert(rolls == beforeMoves + 2 and motionSteps == 2 and motionCancelled == 1 and finderShown)
 actions.gradingCapture(); clock = 21; tick(0.01, axes); clock = 21.1; tick(0.01, axes)
 actions.toggle(); assert(motionCancelled == 2)
+-- The Studio dial applies to the normal shutter, and a wrong-size write
+-- never becomes a visible print master or triggers the paired EXR.
+exposureShot = {mode="Game", iso=100}
+actions.toggle()
+local composition = currentSession.studio.camera
+for i = 1, 3 do composition.adjust(currentSession, "captureScale", 1) end
+assert(composition.values(currentSession).captureScale == "4×  7680×4320")
+actions.gradingCapture()
+clock = 23; tick(0.01, still); clock = 23.1; tick(0.01, still)
+local stage = assert(requested.stagedPNG)
+writeHeader(1920, true, stage)
+clock = 24; tick(0.01, still)
+assert(not io.open(stage, "rb") and not io.open(imagePath, "rb") and exrCalls == 1)
+actions.gradingCapture()
+clock = 25; tick(0.01, still); clock = 25.1; tick(0.01, still)
+assert(requested.output == requested.linear.output and requested.crop.w == 1920)
+writeHeader(7680, true, requested.stagedPNG, 4320)
+clock = 26; tick(0.01, still)
+assert(exrCalls == 2 and not requested.stagedPNG and photo.checkFile(requested))
+assert(finderShown and lastDisplay.readout:find("7680 × 4320"))
+clock = 27; tick(0.01, still)
+os.remove(imagePath)
+viewWidth = 5120
+actions.gradingCapture()
+assert(not currentSession.pending and table.concat(messages):find("16384%-pixel renderer limit"))
+viewWidth = 1920
+actions.gradingCapture()
+viewWidth = 1918
+clock = 28; tick(0.01, still); clock = 28.1; tick(0.01, still)
+assert(not currentSession.pending and table.concat(messages):find("Viewport changed before capture"))
+actions.toggle()
 print("Passed camera movement, optics, crop, short and timed shutter, cancellation and session cleanup checks.")

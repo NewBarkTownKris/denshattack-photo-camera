@@ -43,8 +43,9 @@ local function deflate(file,state,raw,last)
     chunk(file,"IDAT",table.concat(blocks))
 end
 
-function png.step(job,request)
-    local w,h=request.crop.w,request.crop.h
+function png.step(job,request,band)
+    local output = request.output or request.crop
+    local w,h = output.w,output.h
     if not job.pngRead then
         local out <close> = assert(io.open(job.recovery,"wb"))
         assert(out:write(signature))
@@ -53,8 +54,11 @@ function png.step(job,request)
         job.pngRead={row=0,adlerA=1,adlerB=0,byte=srgbCache(job.count)}
     end
     local state=job.pngRead
-    local rows=math.min(h-state.row,math.max(1,65536//w))
-    local colors=job.lib:ReadRenderTargetRawPixelArea(job.world,job.displaySum.rt,job.left,state.row,w,rows,false)
+    local stop = band and band.first+band.rows or h
+    local sourceY = band and band.sourceY+state.row-band.first or state.row
+    local rows = math.min(stop-state.row,math.max(1,65536//w))
+    assert(rows > 0 and sourceY >= 0, "Timed PNG bands are out of sequence")
+    local colors=job.lib:ReadRenderTargetRawPixelArea(job.world,job.displaySum.rt,job.left,sourceY,w,rows,false)
     assert(#colors==w*rows,"Incomplete rectangle in timed PNG readback")
     local wrapped=colors[1].R==nil and type(colors[1].get)=="function"
     local lines,pixels,read={}, {}, 1
@@ -72,7 +76,7 @@ function png.step(job,request)
     deflate(out,state,table.concat(lines),last)
     if last then chunk(out,"IEND","") end
     state.row=state.row+rows
-    return last
+    return state.row==stop
 end
 
 return png

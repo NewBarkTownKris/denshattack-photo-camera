@@ -6,6 +6,7 @@ photo.frames = {
     {name = "21:9", 21, 9}, {name = "65:24", 65, 24},
 }
 photo.lenses = {16, 24, 35, 50, 85, 135, 200, 600}
+photo.maxRenderDimension = 16384 -- Win64 D3D texture dimension limit
 
 function photo.frame(index, portrait)
     local frame = photo.frames[index]
@@ -24,6 +25,18 @@ function photo.crop(width, height, a, b)
         w, h = a * scale, b * scale
     end
     return {x = (width - w) // 2, y = (height - h) // 2, w = w, h = h}
+end
+
+-- The gate always uses viewport pixels. Only the captured raster is scaled.
+function photo.output(crop, scale, timed)
+    assert(math.type(scale) == "integer" and scale >= 1 and scale <= 4, "Choose a capture scale from 1× to 4×")
+    local w, h = crop.w, crop.h
+    assert(math.tointeger(w) and math.tointeger(h) and w > 0 and h > 0, "Invalid photo dimensions")
+    if timed and math.max(w, h) > 3840 then
+        local ratio = 3840 / math.max(w, h)
+        w, h = math.max(1, math.floor(w*ratio + 0.5)), math.max(1, math.floor(h*ratio + 0.5))
+    end
+    return {w=w*scale, h=h*scale}
 end
 
 function photo.lensFov(mm)
@@ -61,6 +74,24 @@ function photo.move(pose, dt, axes)
 end
 
 local sequence = 0
+local function exists(path)
+    local file = io.open(path, "rb")
+    if file then file:close(); return true end
+    return false
+end
+
+-- Native high-resolution captures are published only after checking their size.
+function photo.stagePNG(request)
+    local path = request.path:gsub("([^/]+)%.png$", ".%1.print.png")
+    assert(path ~= request.path and not exists(path), "Another print capture is using this filename")
+    request.stagedPNG = path
+end
+
+function photo.cancelPNG(request)
+    if request.stagedPNG and exists(request.stagedPNG) then return os.remove(request.stagedPNG) end
+    return true
+end
+
 function photo.request(dir, crop, withLinear)
     assert(type(dir) == "string" and dir ~= "", "Screenshot directory unavailable")
     local base = os.date("Denshattack_%Y%m%d_%H%M%S")
@@ -88,18 +119,30 @@ end
 -- Screenshot writes are asynchronous. Wait for the final PNG chunk and check
 -- the stored dimensions before reporting success or restoring the game view.
 function photo.checkFile(request)
-    local file = io.open(request.path, "rb")
+    local file = io.open(request.stagedPNG or request.path, "rb")
     if not file then return false end
     local header = file:read(24)
-    local tail = file:seek("end", -12) and file:read(12)
+    local size = file:seek("end")
+    local tail = size and size >= 12 and file:seek("set", size - 12) and file:read(12)
     file:close()
-    if not header or #header < 24 or tail ~= "\0\0\0\0IEND\174\66\96\130" then return false end
+    if not header or #header < 24 or tail ~= "\0\0\0\0IEND\174\66\96\130" then
+        local growing = size and size > (request.lastPNGSize or 0)
+        request.lastPNGSize = size
+        return false, nil, growing
+    end
     if header:sub(1, 8) ~= "\137PNG\r\n\26\n" or header:sub(13, 16) ~= "IHDR" then
         return false, "Capture has an unexpected file format"
     end
     local w, h = string.unpack(">I4I4", header, 17)
-    if w ~= request.crop.w or h ~= request.crop.h then
-        return false, ("Capture is %dx%d, expected %dx%d: %s"):format(w, h, request.crop.w, request.crop.h, request.path)
+    local output = request.output or request.crop
+    if w ~= output.w or h ~= output.h then
+        return false, ("Capture is %dx%d, expected %dx%d: %s"):format(w, h, output.w, output.h, request.path)
+    end
+    if request.stagedPNG then
+        if exists(request.path) then return false, "Another image already occupies " .. request.path end
+        local published, reason = os.rename(request.stagedPNG, request.path)
+        if not published then return false, "Could not publish the print PNG: " .. tostring(reason) end
+        request.stagedPNG = nil
     end
     return true
 end

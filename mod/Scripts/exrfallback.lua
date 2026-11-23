@@ -30,9 +30,14 @@ end
 
 -- Writes to tx.partial. The caller publishes the completed file and handles
 -- cancellation with the same lifecycle used by the native writer.
-function fallback.step(tx, request, rgbHeader)
-    local w, h = request.crop.w, request.crop.h
-    local left = tx.left or 0
+function fallback.step(tx, request, rgbHeader, band)
+    local output = request.output or request.crop
+    local w, h = output.w, output.h
+    local first = tx.fallbackRow or 0
+    local limit = band and band.first + band.rows or h
+    if band then
+        assert(band.first <= first and first < limit and limit <= h, "Out-of-order EXR band")
+    end
     if tx.fallbackRow == nil then
         local hdr = rgbHeader(w, h, tx.chroma, tx.exposure, tx.samples)
         local out <close> = assert(io.open(tx.partial, "wb"))
@@ -43,12 +48,14 @@ function fallback.step(tx, request, rgbHeader)
         assert(out:flush())
         tx.fallbackRow = 0
     end
-    if tx.fallbackRow == h then return true end
-    local first = tx.fallbackRow
-    local rows = math.min(h - first, math.max(1, maxSamples // w))
+    if first == limit then return true end
+    local rows = math.min(limit - first, math.max(1, maxSamples // w))
     -- This shipping build interprets the last two rectangle arguments as
     -- extents, even though their reflected names are MaxX and MaxY.
-    local colors = tx.library:ReadRenderTargetRawPixelArea(tx.world, tx.target, left, first, w, rows, false)
+    local left = band and band.left or tx.left or 0
+    local sourceY = band and (band.sourceY + first - band.first) or first
+    local target = band and band.target or tx.target
+    local colors = tx.library:ReadRenderTargetRawPixelArea(tx.world, target, left, sourceY, w, rows, false)
     assert(#colors == w * rows, "Incomplete rectangle in EXR scene color readback")
     local firstPixel = colors[1]
     local unwrap = firstPixel.R == nil and type(firstPixel.get) == "function"
@@ -76,7 +83,7 @@ function fallback.step(tx, request, rgbHeader)
     end
     assert(out:flush())
     tx.fallbackRow = first + rows
-    return tx.fallbackRow == h
+    return tx.fallbackRow == limit
 end
 
 return fallback

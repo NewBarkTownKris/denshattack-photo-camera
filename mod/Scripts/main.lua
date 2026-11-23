@@ -18,6 +18,10 @@ local function log(message)
 end
 
 local function releaseCapture(request)
+    if request and request.stagedPNG then
+        local ok, why = photo.cancelPNG(request)
+        if not ok then log("PNG cleanup: " .. tostring(why)) end
+    end
     if request and request.motionJob then
         local ok, why = motion.cancel(request)
         if not ok then log("Long exposure cleanup: " .. tostring(why)) end
@@ -86,7 +90,8 @@ local function drawFinder(s)
     local meterText = exposure.status(s)
     if meterText and meterText ~= "" then info = info .. "   " .. meterText end
     local timed = s.pending and s.pending.timed
-    local panel = not timed and studio.model(s)
+    local printEXR = s.pending and s.pending.isLinear and s.pending.scale > 1
+    local panel = not timed and not printEXR and studio.model(s)
     local reading = exposure.snapshot(s)
     local meterEV = reading.mode ~= "Game" and not timed and reading.evError or nil
     local hint = s.notice or "F9 PNG   F3 PNG + EXR   F4 Studio   F2 Folder   F1 Controls"
@@ -98,6 +103,9 @@ local function drawFinder(s)
         else
             info, hint = "Developing photo", "F8 cancels"
         end
+    elseif printEXR then
+        info = ("Developing %d × %d EXR"):format(s.pending.output.w, s.pending.output.h)
+        hint = "PNG saved     F8 keeps the PNG and cancels the EXR"
     elseif s.help and not s.notice then
         hint = "WASD / Left stick Move   Mouse / Arrows / Right stick Aim\n"
             .. "E/Q Height   Z/X Roll   F10 Level\n"
@@ -165,6 +173,11 @@ local function navigateStudio(s, axes, now)
     end
 end
 
+local function sameViewport(session, request)
+    local w, h = ue.viewport(session)
+    return request.viewport.w == w and request.viewport.h == h
+end
+
 local function update(session, dt, axes)
     if current ~= session then return false end
     local alive, why = ue.alive(session)
@@ -180,6 +193,9 @@ local function update(session, dt, axes)
             request.frames = request.frames - 1
             if request.frames > 0 or now - session.requestTime < 0.05 then return true end
             request.frames = nil
+            if not sameViewport(session, request) then
+                return completeShot(session, "Viewport changed before capture. Reframe and press the shutter again")
+            end
             local ok, reason
             if request.timed then ok, reason = motion.start(session, request, now)
             else ok, reason = ue.capture(session, request) end
@@ -213,22 +229,32 @@ local function update(session, dt, axes)
             return true
         end
         if now < session.nextCheck then return true end
-        session.nextCheck = now + 0.1
+        session.nextCheck = request.isLinear and request.scale > 1 and now or now + 0.1
         local checkFile = request.isLinear and linear.checkFile or photo.checkFile
         local saved, problem, madeProgress = checkFile(request, now)
         if madeProgress then session.requestTime = now end
         if saved and request.linear then
             log("Saved " .. (request.displayPath or request.path))
             local exr = request.linear
+            if not sameViewport(session, exr) then
+                return completeShot(session, "PNG saved. EXR canceled because the viewport changed")
+            end
             local ok, reason = linear.capture(session, exr)
             if not ok then return completeShot(session, "PNG saved. EXR failed: " .. tostring(reason)) end
             exr.isLinear = true
             session.pending = exr
             session.requestTime = ue.time(session)
             session.nextCheck = session.requestTime
+            if exr.scale > 1 then
+                drawFinder(session)
+                showFinder(session, session.showFinder)
+            end
             return true
         end
-        if saved or problem or now - session.requestTime >= (request.isLinear and 30 or 8) then
+        -- A 4× PNG has sixteen times the pixels to encode. Only idle time
+        -- counts here; a growing file or advancing EXR strip resets the clock.
+        local timeout = request.isLinear and 30 or (8 * request.scale * request.scale)
+        if saved or problem or now - session.requestTime >= timeout then
             local displayPath = request.displayPath or request.path
             if saved then return completeShot(session, "Saved " .. displayPath) end
             local errorMessage = problem or ("Timed out waiting for " .. displayPath)
@@ -255,7 +281,7 @@ end
 
 local function toggle()
     if current then
-        if current.pending and current.pending.timed then finish(current)
+        if current.pending and (current.pending.timed or (current.pending.isLinear and current.pending.scale > 1)) then finish(current)
         elseif current.pending then current.exitRequested = true
         else finish(current) end
         return
@@ -264,6 +290,7 @@ local function toggle()
     if not session then log(reason); return end
     current = session
     session.frameIndex, session.lensIndex, session.portrait = 1, 0, false
+    session.captureScale = 1
     session.grid, session.showFinder, session.nextDraw, session.reticleIndex = false, true, 0, 1
     local applied, detail = effects.open(session, ue.defer)
     session.speedEffectsSuppressed = applied
@@ -287,6 +314,10 @@ local function toggle()
     log("Photo mode active. F9 saves PNG, F3 saves PNG + linear EXR. F8 returns to the train.")
 end
 
+local function isTimed(settings)
+    return settings.mode ~= "Game" and settings.seconds and settings.seconds >= 1/15 - 1e-7
+end
+
 local function capture(session, withLinear)
     local w, h = ue.viewport(session)
     assert(w, h)
@@ -304,8 +335,18 @@ local function capture(session, withLinear)
         assert(settings.ready ~= false, session.lastMeterIssue or "Waiting for the first light-meter reading")
         request.exposure = settings
         if request.linear then request.linear.exposure = settings end
-        request.timed = settings.seconds >= 1/15 - 1e-7
+        request.timed = isTimed(settings)
     end
+    local scale = session.captureScale
+    if not request.timed and math.max(w, h) * scale > photo.maxRenderDimension then
+        return ("A %d× capture exceeds the %d-pixel renderer limit. Choose a smaller capture scale"):format(scale, photo.maxRenderDimension)
+    end
+    request.scale, request.viewport = scale, {w=w, h=h}
+    request.output = photo.output(crop, scale, request.timed)
+    if request.linear then
+        request.linear.scale, request.linear.viewport, request.linear.output = scale, request.viewport, request.output
+    end
+    if scale > 1 and not request.timed then photo.stagePNG(request) end
     if displayDir then
         local native = displayDir:match("^%a:\\")
         local prefix = native and (displayDir:gsub("\\+$", "") .. "\\")
@@ -316,7 +357,8 @@ local function capture(session, withLinear)
     showFinder(session, false)
     request.frames = 2
     session.pending, session.requestTime = request, ue.time(session)
-    log("Requested " .. request.filename .. (withLinear and " + scene-linear EXR" or ""))
+    log(("Requested %s%s at %d× (%d × %d)"):format(request.filename, withLinear and " + scene-linear EXR" or "",
+        scale, request.output.w, request.output.h))
 end
 
 local function setFrame(session, index, portrait)
@@ -341,7 +383,7 @@ end
 function composition.options(s)
     local o = s.optics or {}
     return {frame=s.frameIndex, orientation=s.portrait, lens=s.lensIndex, reticle=s.reticleIndex,
-        grid=s.grid, strength=o.strength or 1, dof=o.enabled or false}
+        grid=s.grid, strength=o.strength or 1, dof=o.enabled or false, captureScale=s.captureScale}
 end
 
 function composition.restore(s, o)
@@ -352,6 +394,9 @@ function composition.restore(s, o)
     if photo.lenses[o.lens] then setLens(s, o.lens) end
     if finder.reticles[o.reticle] then s.reticleIndex = o.reticle end
     if type(o.grid) == "boolean" then s.grid = o.grid end
+    if math.type(o.captureScale) == "integer" and o.captureScale >= 1 and o.captureScale <= 4 then
+        s.captureScale = o.captureScale
+    end
     if math.type(o.strength) == "integer" and o.strength >= 1 and o.strength <= 4 then optics.setStrength(s, o.strength) end
     if type(o.dof) == "boolean" and o.dof ~= (s.optics and s.optics.enabled or false) then optics.toggle(s) end
 end
@@ -359,13 +404,25 @@ end
 function composition.values(s)
     local o = composition.options(s)
     local mm = 18 / math.tan(math.rad(s.pose.fov / 2))
+    local scaleText = ("%d×"):format(s.captureScale)
+    local width, height = ue.viewport(s)
+    if width then
+        local a, b = photo.frame(s.frameIndex, s.portrait)
+        local timed = isTimed(exposure.snapshot(s))
+        local output = photo.output(photo.crop(width, height, a, b), s.captureScale, timed)
+        scaleText = (not timed and math.max(width, height) * s.captureScale > photo.maxRenderDimension)
+            and (scaleText .. "  Over limit") or ("%s  %d×%d"):format(scaleText, output.w, output.h)
+    end
     return {frame=photo.frames[o.frame].name, orientation=o.orientation and "Portrait" or "Landscape",
+        captureScale=scaleText,
         lens=("%.1f mm"):format(mm), dof=o.dof and "On" or "Off", strength=("%dx"):format(2^(o.strength-1)),
         focusMode=o.dof and s.optics.mode or "Off", reticle=finder.reticles[o.reticle], grid=o.grid and "On" or "Off"}
 end
 
 function composition.adjust(s, key, delta)
-    if key == "frame" then
+    if key == "captureScale" then
+        s.captureScale = math.max(1, math.min(4, s.captureScale + delta))
+    elseif key == "frame" then
         setFrame(s, (s.frameIndex - 1 + delta) % #photo.frames + 1, s.portrait)
     elseif key == "orientation" then
         -- Rotating the native viewport starts with the 35 mm gate.
@@ -402,7 +459,7 @@ end
 
 local handlers = {
     capture = capture,
-    gradingCapture = function(s) capture(s, true) end,
+    gradingCapture = function(s) return capture(s, true) end,
     studio = function(s)
         assert(s.finder, "Finder unavailable")
         studio.toggle(s)
