@@ -3,8 +3,10 @@ local optics = {}
 local apertures = {1, 1.1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5,
     4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16}
 local strengths = {1, 2, 4, 8}
+optics.apertures = apertures
 local sensorWidth = 36 -- mm, matches photo.lensFov
 local maxDistance = 1000000 -- cm
+local traceInterval = 0.125 -- real seconds
 
 local function settings(session)
     if not session.optics then
@@ -26,8 +28,20 @@ end
 function optics.status(session)
     local s = settings(session)
     local mode = s.enabled and s.mode or "Photo DOF off"
-    return ("%s | %.2f m | f/%g equiv. | %dx DOF"):format(mode,
-        focusDistance(session, s.distance) / 100, apertures[s.aperture], strengths[s.strength])
+    local focus = focusDistance(session, s.distance)
+    local status = ("%s | %.2f m | f/%g equiv. | %dx DOF"):format(mode,
+        focus / 100, apertures[s.aperture], strengths[s.strength])
+    if not s.enabled or not s.sampled then return status end
+    if s.focusIssue then return status .. " | " .. s.focusIssue end
+    if not s.subject then return status .. " | No center target" end
+    -- Compare the subject's circle of confusion with the conventional
+    -- 0.03 mm limit on a 35 mm frame. The same equivalent aperture drives DOF.
+    local focal = focalLength(session)
+    local fStop = apertures[s.aperture] / strengths[s.strength]
+    local blur = focal^2 * math.abs(1 - focus / s.subject) / (fStop * (10 * focus - focal))
+    local aid = "Aligned"
+    if blur > 0.03 then aid = s.subject < focus and "Focus nearer" or "Focus farther" end
+    return ("%s | Subject %.2f m | %s"):format(status, s.subject / 100, aid)
 end
 
 local function readOverrides(pp)
@@ -108,11 +122,31 @@ function optics.aperture(session, direction)
     return apply(session, {aperture = index})
 end
 
-function optics.strength(session)
-    return apply(session, {strength = settings(session).strength % #strengths + 1})
+function optics.fNumber(session)
+    return apertures[settings(session).aperture]
 end
 
-function optics.autofocus(session)
+function optics.setFNumber(session, fnumber)
+    for i, stop in ipairs(apertures) do
+        if stop == fnumber then
+            if settings(session).aperture ~= i then apply(session, {aperture=i}) end
+            return
+        end
+    end
+    error("Unsupported photographic aperture")
+end
+
+function optics.setStrength(session, index)
+    assert(strengths[index], "Unsupported depth-of-field strength")
+    if settings(session).strength == index then return optics.status(session) end
+    return apply(session, {strength = index})
+end
+
+function optics.strength(session)
+    return optics.setStrength(session, settings(session).strength % #strengths + 1)
+end
+
+local function centerDistance(session)
     local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     assert(system and system:IsValid(), "Unreal collision tracing is unavailable")
     local pose, keys = session.pose, session.locationKeys
@@ -132,11 +166,50 @@ function optics.autofocus(session)
         for key, value in pairs(hit) do
             if type(key) == "string" and key:lower() == "distance" and type(value) == "number"
                     and value > 0 and value <= maxDistance then
-                return apply(session, {enabled = true, mode = "AF lock", distance = focusDistance(session, value)})
+                return value
             end
         end
     end
+end
+
+function optics.autofocus(session)
+    local distance = centerDistance(session)
+    local s = settings(session)
+    s.sampled, s.subject, s.focusIssue = true, distance, nil
+    if distance then
+        return apply(session, {enabled = true, mode = "AF lock", distance = focusDistance(session, distance)})
+    end
     return "AF found no focusable surface | " .. optics.status(session)
+end
+
+function optics.toggleTracking(session)
+    local s = settings(session)
+    if s.enabled and s.mode == "AF-C" then return apply(session, {mode = "AF lock"}) end
+    return apply(session, {enabled = true, mode = "AF-C", nextTrace = 0})
+end
+
+-- A short exposure and every pose of a timed exposure retain the same
+-- focus. The caller stops ticking once the shutter opens and may request
+-- a final AF-C reading at the instant it opens.
+function optics.track(session, now, shutter)
+    local s = settings(session)
+    if session.pending or not s.enabled or (shutter and s.mode ~= "AF-C") then return end
+    if not shutter and now < (s.nextTrace or 0) then return end
+    s.nextTrace = now + traceInterval
+    local ok, distance = pcall(centerDistance, session)
+    s.sampled = true
+    if not ok then
+        s.subject, s.focusIssue, s.nextTrace = nil, "Focus range unavailable", now + 2
+        return
+    end
+    s.subject, s.focusIssue = distance, nil
+    if s.mode == "AF-C" and distance then
+        local target = focusDistance(session, distance)
+        if math.abs(target - s.distance) > 0.001 then
+            local moved = pcall(apply, session, {distance = target})
+            if not moved then s.focusIssue, s.nextTrace = "Focus adjustment unavailable", now + 2 end
+        end
+    end
 end
 
 return optics

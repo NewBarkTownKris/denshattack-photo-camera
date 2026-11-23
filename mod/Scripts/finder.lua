@@ -104,15 +104,66 @@ local function build(handle, pc)
         text:SetFont({FontObject = font, TypefaceFontName = FName(face), Size = size})
         text:SetColorAndOpacity({SpecifiedColor = tint, ColorUseRule = 0})
         text:SetAutoWrapText(true)
-        rows:AddChildToVerticalBox(text)
         return text
     end
+    local scale = {panel=make("CanvasPanel"), ticks={}}
+    handle.meter = scale
+    scale.slot = canvas:AddChildToCanvas(scale.panel)
+    for i = -9, 9 do
+        local tick = make("Border")
+        tick:SetBrushColor(color(1, 1, 1, i % 3 == 0 and 0.9 or 0.55))
+        scale.ticks[i] = scale.panel:AddChildToCanvas(tick)
+    end
+    local indicator = make("Border")
+    indicator:SetBrushColor(color(1, 0.62, 0.14, 1))
+    scale.indicator = scale.panel:AddChildToCanvas(indicator)
+    scale.panel:SetVisibility(hidden)
     handle.readout = label(16, "Medium", color(1, 1, 1, 1))
     handle.hint = label(12, "Regular", color(0.68, 0.83, 0.85, 1))
+    rows:AddChildToVerticalBox(handle.readout)
+    rows:AddChildToVerticalBox(handle.hint)
+    handle.panel = panel
     handle.bounds = bounds
     handle.card = canvas:AddChildToCanvas(panel)
     handle.card:SetAutoSize(true)
     handle.card:SetAlignment(xy(0, 1))
+    local studio = {items={}}
+    handle.studio = studio
+    studio.panel, studio.bounds = make("Border"), make("SizeBox")
+    local column = make("VerticalBox")
+    studio.panel:SetBrushColor(color(0.014, 0.021, 0.025, 0.96))
+    studio.panel:SetPadding({Left=14, Top=10, Right=14, Bottom=10})
+    studio.panel:SetContent(studio.bounds)
+    studio.bounds:SetContent(column)
+    local white, secondary = color(0.96, 0.98, 1, 1), color(0.69, 0.79, 0.82, 1)
+    local function field(text, size, face, tint)
+        local widget = label(size, face, tint)
+        widget:SetText(FText(text))
+        column:AddChildToVerticalBox(widget)
+        return widget
+    end
+    field("Photo Studio", 18, "Medium", white)
+    studio.summary = field("", 13, "Medium", white)
+    studio.meter = field("", 12, "Regular", secondary)
+    for i = 1, 11 do
+        local item = {box=make("SizeBox"), border=make("Border"), label=label(12, "Regular", white),
+            value=label(12, "Medium", white)}
+        item.box:SetHeightOverride(26)
+        local line = make("CanvasPanel")
+        item.border:SetPadding({Left=0, Top=0, Right=0, Bottom=0})
+        item.border:SetContent(line)
+        item.box:SetContent(item.border)
+        item.value:SetJustification(2)
+        item.label:SetAutoWrapText(false)
+        item.value:SetAutoWrapText(false)
+        item.labelSlot = line:AddChildToCanvas(item.label)
+        item.valueSlot = line:AddChildToCanvas(item.value)
+        column:AddChildToVerticalBox(item.box)
+        studio.items[i] = item
+    end
+    studio.help = field("↑ ↓  Select     ← →  Adjust     F4  Close", 12, "Regular", secondary)
+    studio.slot = canvas:AddChildToCanvas(studio.panel)
+    studio.panel:SetVisibility(hidden)
     handle.layout = object("/Script/UMG.Default__WidgetLayoutLibrary")
     handle.pc = pc
     host:SetVisibility(hidden)
@@ -213,12 +264,67 @@ local function layout(handle, model, dpi)
         placeStroke(handle.guides[i + 2], 0, h * i / 3, w, pixel, pixel)
     end
     rect(handle.marksSlot, x, y, w, h)
+    local scale = handle.meter
+    scale.halfWidth = math.min(84, w * 0.25)
+    rect(scale.slot, x + w/2 - scale.halfWidth, y + math.min(16, h/16), scale.halfWidth * 2, 18)
+    for i = -9, 9 do
+        local height = i == 0 and 10 or (i % 3 == 0 and 7 or 4)
+        rect(scale.ticks[i], scale.halfWidth * (1 + i/9) - 0.5, 10-height, 1, height)
+    end
     local margin = math.min(18, width / 16, height / 16)
     handle.card:SetPosition(xy(margin, height - margin))
     -- Auto-wrapped text measures against its last allotted width. Give the
     -- rows a stable width after shutter visibility and status changes, while
     -- allowing the card height to follow wrapped text on narrower displays.
     handle.bounds:SetWidthOverride(math.max(1, math.min(cardContentWidth, width - 2 * margin - 24)))
+    local studio = handle.studio
+    studio.width = math.max(1, math.min(320, width - 2 * margin - 28))
+    studio.capacity = math.max(1, math.min(#studio.items, math.floor((height - 2 * margin - 122) / 26)))
+    studio.bounds:SetWidthOverride(studio.width)
+    studio.slot:SetAutoSize(true)
+    studio.slot:SetPosition(xy(margin, margin))
+    local split = math.floor(studio.width * 0.53)
+    for _, item in ipairs(studio.items) do
+        rect(item.labelSlot, 6, 3, math.max(1, split - 6), 22)
+        rect(item.valueSlot, split, 3, math.max(1, studio.width - split - 6), 22)
+    end
+end
+
+local function updateStudio(handle, model, resized)
+    local view = handle.studio
+    if not model then
+        if view.key then
+            view.panel:SetVisibility(hidden)
+            handle.panel:SetVisibility(hitTestInvisible)
+            view.key = nil
+        end
+        return
+    end
+    if view.key == model.key and not resized then return end
+    view.key = model.key
+    handle.panel:SetVisibility(hidden)
+    view.panel:SetVisibility(hitTestInvisible)
+    view.summary:SetText(FText(model.summary))
+    view.meter:SetText(FText(model.meter))
+    local limit = math.min(view.capacity, #model.rows)
+    local start = math.max(1, math.min(model.selected - limit // 2, #model.rows - limit + 1))
+    for i, item in ipairs(view.items) do
+        local index = start + i - 1
+        if i > limit then
+            item.box:SetVisibility(1) -- Collapsed rows release their vertical space.
+        else
+            local row = model.rows[index]
+            local selected = index == model.selected
+            item.box:SetVisibility(hitTestInvisible)
+            item.border:SetBrushColor(selected and color(0.07, 0.22, 0.25, 1) or color(0, 0, 0, 0))
+            local tint = row.locked and color(0.60, 0.67, 0.69, 1) or color(0.96, 0.98, 1, 1)
+            local slateColor = {SpecifiedColor=tint, ColorUseRule=0}
+            item.label:SetColorAndOpacity(slateColor)
+            item.value:SetColorAndOpacity(slateColor)
+            item.label:SetText(FText(row.label))
+            item.value:SetText(FText(row.value))
+        end
+    end
 end
 
 function finder.update(handle, model)
@@ -244,6 +350,17 @@ function finder.update(handle, model)
         if gridShown ~= handle.gridShown then
             handle.grid:SetVisibility(gridShown and hitTestInvisible or hidden)
             handle.gridShown = gridShown
+        end
+        updateStudio(handle, model.studio, resized)
+        local ev = not model.studio and model.meterEV
+        if ev ~= handle.meter.ev or resized then
+            local scale = handle.meter
+            scale.ev = ev
+            scale.panel:SetVisibility(type(ev) == "number" and hitTestInvisible or hidden)
+            if type(ev) == "number" then
+                local x = scale.halfWidth * (1 + math.max(-3, math.min(3, ev))/3)
+                rect(scale.indicator, x-2, 11, 4, 5)
+            end
         end
         for _, key in ipairs({"readout", "hint"}) do
             local value = model[key] or ""

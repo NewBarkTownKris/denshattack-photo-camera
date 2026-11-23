@@ -56,17 +56,19 @@ local function header(f, w, h)
         "EXR dimensions do not match the selected frame")
     assert(attrs.compression and attrs.compression.bytes == "\0", "Expected uncompressed EXR scanlines")
     assert(attrs.channels and attrs.channels.kind == "chlist", "Missing EXR channels")
-    local list = {}
+    local list, sampleType = {}, nil
     local pos, data = 1, attrs.channels.bytes
     while data:byte(pos) ~= 0 do
         local channel, pixel, _, x, y
         channel, pixel, _, x, y, pos = string.unpack("<zI4I4i4i4", data, pos)
-        assert(pixel == 1 and x == 1 and y == 1, "Expected full-resolution HALF channels")
+        assert((pixel == 1 or pixel == 2) and (not sampleType or pixel == sampleType) and x == 1 and y == 1,
+            "Expected matching full-resolution HALF or FLOAT channels")
+        sampleType = pixel
         list[#list + 1] = channel
     end
     local channels = table.concat(list)
     assert(channels == "ABGR" or channels == "BGR", "Unexpected EXR channels: " .. channels)
-    return channels
+    return channels, sampleType
 end
 
 local function colorSpace()
@@ -77,12 +79,25 @@ local function colorSpace()
     return string.pack("<ffffffff", 0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290)
 end
 
-local function rgbHeader(w, h, chroma)
+local function rgbHeader(w, h, chroma, exposure, samples)
     local entries = {}
     for _, ch in ipairs({"B", "G", "R"}) do
-        entries[#entries + 1] = string.pack("<zI4I4i4i4", ch, 1, 0, 1, 1)
+        entries[#entries + 1] = string.pack("<zI4I4i4i4", ch, exposure and 2 or 1, 0, 1, 1)
     end
     local box = string.pack("<i4i4i4i4", 0, 0, w-1, h-1)
+    local metadata = ""
+    if exposure then
+        metadata = attribute("denshExposureMode", "string", exposure.mode)
+        for _, pair in ipairs({{"aperture","aperture"}, {"expTime","seconds"}, {"isoSpeed","iso"},
+                {"denshExposureGain","gain"}, {"denshMeteredEV","meteredEV"},
+                {"denshEVCompensation","compensation"}, {"denshEVError","evError"}}) do
+            local value = exposure[pair[2]]
+            if type(value) == "number" then
+                metadata = metadata .. attribute(pair[1], "float", string.pack("<f", value))
+            end
+        end
+        metadata = metadata .. attribute("denshShutterSamples", "int", string.pack("<i4", samples or 1))
+    end
     return magic .. attribute("channels", "chlist", table.concat(entries) .. "\0")
         .. attribute("compression", "compression", "\0")
         .. attribute("dataWindow", "box2i", box) .. attribute("displayWindow", "box2i", box)
@@ -90,45 +105,71 @@ local function rgbHeader(w, h, chroma)
         .. attribute("screenWindowCenter", "v2f", string.pack("<ff", 0, 0))
         .. attribute("screenWindowWidth", "float", string.pack("<f", 1))
         .. attribute("chromaticities", "chromaticities", chroma)
-        .. attribute("comments", "string", "Denshattack Photo Camera; SceneColor HDR; linear Rec.709/D65") .. "\0"
+        .. metadata .. attribute("comments", "string", "Denshattack Photo Camera; SceneColor HDR; linear Rec.709/D65") .. "\0"
 end
 
--- The HDRNoAlpha source places zero in alpha. Strip that channel so grading
--- software displays the RGB as an opaque still. Preserve every RGB half bit,
--- including signed and superwhite values. Memory usage scales with one row.
-local function publishRGB(source, dest, w, h, chroma, renderWidth, left)
-    local f <close> = assert(io.open(source, "rb"), "Unreal did not produce the EXR")
-    local channels = header(f, renderWidth, h)
-    local indices = readExact(f, h * 8)
-    local out <close> = assert(io.open(dest, "wb"))
-    local hdr = rgbHeader(w, h, chroma)
-    assert(out:write(hdr))
-    local stride = 8 + 6 * w
-    local first = #hdr + h * 8
-    for y = 0, h-1 do assert(out:write(string.pack("<I8", first + y * stride))) end
-    for y = 0, h-1 do
-        assert(f:seek("set", string.unpack("<I8", indices, y * 8 + 1)))
+-- Convert each distinct source HALF once for an exposed master. FLOAT retains
+-- bright emitters that can exceed 65504 after photographic exposure.
+local function scaledHalf(gain)
+    return setmetatable({}, {__index=function(cache, bytes)
+        local bits = string.unpack("<I2", bytes)
+        local exp, fraction = (bits >> 10) & 31, bits & 1023
+        assert(exp ~= 31, "Invalid scene color in EXR")
+        local value = exp == 0 and fraction * 2^-24 or (1 + fraction / 1024) * 2^(exp - 15)
+        if bits >= 32768 then value = -value end
+        local packed = string.pack("<f", value * gain)
+        cache[bytes] = packed
+        return packed
+    end})
+end
+
+-- Strip unused alpha and guard columns. Bound the more expensive FLOAT
+-- conversion to a band per poll, keeping the game thread responsive at 4K.
+local function publishRGB(tx, request)
+    local w, h = request.crop.w, request.crop.h
+    local f <close> = assert(io.open(tx.source, "rb"), "Unreal did not produce the EXR")
+    if not tx.writeRow then
+        tx.channels, tx.pixelType = header(f, tx.renderWidth, h)
+        assert(tx.exposure or tx.pixelType == 1, "Expected a HALF source for the Game exposure")
+        tx.indices = readExact(f, h * 8)
+        local out <close> = assert(io.open(tx.partial, "wb"))
+        local hdr = rgbHeader(w, h, tx.chroma, tx.exposure, tx.samples)
+        assert(out:write(hdr))
+        local stride = 8 + (tx.exposure and 12 or 6) * w
+        for y = 0, h-1 do assert(out:write(string.pack("<I8", #hdr + h * 8 + y * stride))) end
+        tx.writeRow = 0
+        if tx.exposure and tx.pixelType == 1 then tx.lookup = scaledHalf(tx.gain) end
+    end
+    local out <close> = assert(io.open(tx.partial, "ab"))
+    local bytes = tx.pixelType == 1 and 2 or 4
+    local planeSize = tx.renderWidth * bytes
+    local stop = tx.exposure and math.min(h, tx.writeRow + math.max(1, 262144 // w)) or h
+    for y = tx.writeRow, stop-1 do
+        assert(f:seek("set", string.unpack("<I8", tx.indices, y * 8 + 1)))
         local line, size = string.unpack("<i4I4", readExact(f, 8))
-        assert(line == y and size == #channels * renderWidth * 2, "Invalid EXR scanline")
-        if channels == "ABGR" then assert(f:seek("cur", renderWidth * 2)) end
-        local rgb = readExact(f, 6 * renderWidth)
-        assert(out:write(string.pack("<i4I4", y, 6 * w)))
-        if renderWidth == w then
-            assert(out:write(rgb))
-        else
-            -- Uncompressed EXR stores B, G, R as separate planes per row.
-            for plane = 0, 2 do
-                local start = 2 * (plane * renderWidth + left)
-                assert(out:write(rgb:sub(start + 1, start + 2 * w)))
+        assert(line == y and size == #tx.channels * planeSize, "Invalid EXR scanline")
+        if tx.channels == "ABGR" then assert(f:seek("cur", planeSize)) end
+        local rgb = readExact(f, 3 * planeSize)
+        assert(out:write(string.pack("<i4I4", y, (tx.exposure and 12 or 6) * w)))
+        for plane = 0, 2 do
+            local start = plane * planeSize + tx.left * bytes
+            local data = rgb:sub(start + 1, start + w * bytes)
+            if tx.lookup then
+                data = data:gsub("..", tx.lookup)
+            elseif tx.pixelType == 2 and tx.gain ~= 1 then
+                data = data:gsub("....", function(v) return string.pack("<f", string.unpack("<f", v) * tx.gain) end)
             end
+            assert(out:write(data))
         end
     end
-    assert(out:flush())
+    tx.writeRow = stop
+    return stop == h
 end
 
 -- Use the active game's projection at the selected crop boundaries. This
 -- handles the project's axis constraint, including portrait and native gates.
-local function projection(session, crop, library, renderWidth, left)
+local function projection(session, crop, library, renderWidth, left, outputWidth, outputHeight)
+    outputWidth, outputHeight = outputWidth or crop.w, outputHeight or crop.h
     local y = crop.y + crop.h / 2
     local function ray(x)
         local direction = {}
@@ -143,13 +184,15 @@ local function projection(session, crop, library, renderWidth, left)
     -- Extend the frustum by one original pixel footprint per guard column.
     -- For an odd guard count, shift the principal point by half a pixel so
     -- each retained texel still represents the same viewfinder ray.
-    local tangent = math.tan(math.rad(fov) / 2) * renderWidth / crop.w
+    local tangent = math.tan(math.rad(fov) / 2) * renderWidth / outputWidth
     local paddedFov = math.deg(2 * math.atan(tangent))
-    local right = renderWidth - crop.w - left
-    local view = {FOV=paddedFov, AspectRatio=renderWidth/crop.h, ProjectionMode=0,
+    local right = renderWidth - outputWidth - left
+    local view = {FOV=paddedFov, AspectRatio=renderWidth/outputHeight, ProjectionMode=0,
         OffCenterProjectionOffset={X=(right-left)/renderWidth, Y=0}}
     return library:CalculateProjectionMatrix(view), paddedFov
 end
+
+linear.projection = projection
 
 -- UE4SS serializes struct arguments with the exact display spelling of
 -- reflected names. A project's cooked FName casing may differ from the SDK.
@@ -166,6 +209,11 @@ local function structArgs(path, values)
     return fields
 end
 
+function linear.writeOptions(format)
+    return structArgs("/Script/ImageWriteQueue.ImageWriteOptions",
+        {format=format, compressionquality=format == 3 and 1 or 100, boverwritefile=false, basync=false})
+end
+
 function linear.cancel(request)
     local tx = request and request.linearJob
     if not tx then return true end
@@ -175,7 +223,7 @@ function linear.cancel(request)
         if not ok then errors[#errors + 1] = tostring(err) end
     end
     if valid(tx.actor) then release(function() tx.actor:K2_DestroyActor(); tx.actor = nil end) end
-    if valid(tx.target) then release(function() tx.library:ReleaseRenderTarget2D(tx.target); tx.target = nil end) end
+    if not tx.borrowed and valid(tx.target) then release(function() tx.library:ReleaseRenderTarget2D(tx.target); tx.target = nil end) end
     for _, path in ipairs({tx.source, tx.partial}) do
         if exists(path) then release(function() assert(os.remove(path)) end) end
     end
@@ -184,12 +232,14 @@ function linear.cancel(request)
     return true
 end
 
-function linear.capture(session, request)
+local function capture(session, request, supplied, renderWidth, left, samples, divisor)
     local path, crop = request.path, request.crop
     if not path or not path:match("%.exr$") then return false, "Expected an EXR path" end
     local source, partial = path:sub(1, -5) .. ".source.exr", path .. ".partial"
     if request.linearJob or exists(path) or exists(source) or exists(partial) then return false, "EXR filename is already in use" end
-    local tx = {source=source, partial=partial, world=session.world}
+    local exposure = request.exposure and request.exposure.mode ~= "Game" and request.exposure
+    local tx = {source=source, partial=partial, world=session.world, exposure=exposure, samples=samples}
+    tx.gain = (exposure and exposure.gain or 1) / (divisor or 1)
     request.linearJob = tx
     local ok, issue = pcall(function()
         local w, h = crop.w, crop.h
@@ -197,12 +247,17 @@ function linear.capture(session, request)
         tx.chroma = colorSpace()
         tx.library = object("/Script/Engine.Default__KismetRenderingLibrary")
         tx.writer = object("/Script/ImageWriteQueue.Default__ImageWriteBlueprintLibrary")
-        tx.options = structArgs("/Script/ImageWriteQueue.ImageWriteOptions",
-            {format=3, compressionquality=1, boverwritefile=false, basync=false})
+        tx.options = linear.writeOptions(3)
         -- DX12 staging rows are 256-byte aligned. RGBA16F is eight bytes per
         -- texel, so a 32-texel multiple gives the writer tightly packed rows.
         tx.renderWidth = ((w + 31) // 32) * 32
         tx.left = (tx.renderWidth - w) // 2
+        if supplied then
+            assert(valid(supplied) and renderWidth >= w and left >= 0 and left + w <= renderWidth,
+                "Invalid accumulated HDR target")
+            tx.target, tx.renderWidth, tx.left, tx.borrowed = supplied, renderWidth, left, true
+            return
+        end
         local matrix, fov = projection(session, crop, tx.library, tx.renderWidth, tx.left)
         local p = session.pose
         tx.actor = session.world:SpawnActor(object("/Script/Engine.SceneCapture2D"),
@@ -229,11 +284,20 @@ function linear.capture(session, request)
     return true
 end
 
+function linear.capture(session, request)
+    return capture(session, request)
+end
+
+-- The motion integrator owns this render target until verification completes.
+function linear.fromTarget(session, request, target, width, left, samples, divisor)
+    return capture(session, request, target, width, left, samples, divisor)
+end
+
 function linear.checkFile(request, now)
     local tx = request.linearJob
     if tx then
         now = now or os.clock()
-        local previousRow = tx.fallbackRow
+        local previousRow, previousWrite = tx.fallbackRow, tx.writeRow
         local ok, err = pcall(function()
             if not tx.submittedAt then
                 -- CaptureScene queues the render. Keep the actor and target
@@ -258,7 +322,7 @@ function linear.checkFile(request, now)
                 local size = assert(f:seek("end"))
                 if not tx.lastSize or tx.lastSize ~= size then tx.lastSize = size; return end
                 f:close()
-                publishRGB(tx.source, tx.partial, w, h, tx.chroma, tx.renderWidth, tx.left)
+                if not publishRGB(tx, request) then return end
             end
             assert(os.rename(tx.partial, request.path))
             local cleaned, why = linear.cancel(request)
@@ -268,15 +332,16 @@ function linear.checkFile(request, now)
             local _, cleanup = linear.cancel(request)
             return false, tostring(err) .. (cleanup and " / " .. cleanup or "")
         end
-        if request.linearJob then return false, nil, previousRow ~= tx.fallbackRow end
+        if request.linearJob then return false, nil, previousRow ~= tx.fallbackRow or previousWrite ~= tx.writeRow end
     end
     if not exists(request.path) then return false end
     local ok, err = pcall(function()
         local f <close> = assert(io.open(request.path, "rb"))
         local w, h = request.crop.w, request.crop.h
-        assert(header(f, w, h) == "BGR", "Expected RGB EXR")
+        local channels, sampleType = header(f, w, h)
+        assert(channels == "BGR", "Expected RGB EXR")
         local endOfHeader = assert(f:seek())
-        assert(f:seek("end") == endOfHeader + h * (16 + w * 6), "Incomplete RGB EXR")
+        assert(f:seek("end") == endOfHeader + h * (16 + w * (sampleType == 1 and 6 or 12)), "Incomplete RGB EXR")
     end)
     if not ok then return false, tostring(err) end
     return true

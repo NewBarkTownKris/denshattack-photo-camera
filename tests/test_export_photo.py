@@ -8,14 +8,16 @@ from unittest.mock import patch
 
 import numpy as np
 import OpenEXR
+from PIL import ExifTags, TiffTags
+from PIL.TiffImagePlugin import ImageFileDirectory_v2
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 from export_photo import main
 
 
-def write_master(path):
-    OpenEXR.File({"colorInteropID": "lin_rec709_scene"},
+def write_master(path, **capture):
+    OpenEXR.File({"colorInteropID": "lin_rec709_scene", **capture},
                  {"RGB": np.full((4, 4, 3), 300, np.float16)}).write(str(path))
     return path
 
@@ -28,6 +30,43 @@ def run_cli(*args):
 
 
 class CompanionTests(unittest.TestCase):
+    def test_camera_exif_in_the_developed_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            d = Path(folder)
+            for stem, attributes in (("game", {}),
+                    ("photo", {"expTime": 1/32000, "aperture": 1.6, "isoSpeed": 640.0,
+                               "denshExposureMode": "Aperture Priority"}),
+                    ("partial", {"expTime": 0.0, "aperture": float("nan"), "isoSpeed": 100.0})):
+                source = write_master(d / f"{stem}.exr", **attributes)
+                status, _, errors = run_cli(source)
+                self.assertEqual(status, 0, errors)
+                for ext in (".dng", "_logc3.tiff", "_flog.tiff"):
+                    with self.subTest(stem=stem, ext=ext), (d / (stem + ext)).open("rb") as stream:
+                        header = stream.read(8)
+                        parent = ImageFileDirectory_v2(header)
+                        stream.seek(parent.next)
+                        parent.load(stream)
+                        if stem == "game":
+                            self.assertNotIn(ExifTags.IFD.Exif, parent)
+                            continue
+                        stream.seek(parent[ExifTags.IFD.Exif])
+                        tags = ImageFileDirectory_v2(header, group=ExifTags.IFD.Exif)
+                        tags.load(stream)
+                        self.assertEqual(tags.tagtype[34855], TiffTags.SHORT)
+                        self.assertEqual(tags[34855], 100 if stem == "partial" else 640)
+                        if stem == "partial":
+                            self.assertNotIn(33434, tags)
+                            self.assertNotIn(33437, tags)
+                        else:
+                            self.assertEqual(tags.tagtype[33434], TiffTags.RATIONAL)
+                            self.assertEqual(tags.tagtype[33437], TiffTags.RATIONAL)
+                            self.assertEqual((tags[33434].numerator, tags[33434].denominator), (1, 32000))
+                            self.assertEqual((tags[33437].numerator, tags[33437].denominator), (8, 5))
+                            self.assertEqual(tags[34850], 3)
+                        if ext == ".dng":
+                            # The source's 300.0 maximum still requires nine stops of headroom.
+                            self.assertEqual(parent[50730], 9)
+
     def test_default_develops_older_and_partial_shots_without_overwriting(self):
         with tempfile.TemporaryDirectory() as folder:
             d = Path(folder)

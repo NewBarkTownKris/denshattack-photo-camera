@@ -108,6 +108,28 @@ class GradeTests(unittest.TestCase):
             self.assertEqual(grade.highlight_exposure(frame, profile), 0,
                              "A saturated Rec.709 red fits after widening the gamut")
 
+    def test_camera_exif_in_bigtiff(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "big.tif"
+            rgb = np.arange(12, dtype=np.uint16).reshape(2, 2, 3)
+            spec = oiio.ImageSpec(2, 2, 3, oiio.UINT16)
+            spec.attribute("tiff:bigtiff", 1)
+            spec.attribute("Exif:ExifVersion", "0232")
+            writer = oiio.ImageOutput.create(str(path))
+            self.assertTrue(writer.open(str(path), spec))
+            self.assertTrue(writer.write_image(rgb))
+            self.assertTrue(writer.close())
+            grade.write_tiff_exif(path, grade.capture_exif({"expTime": 1/32000, "isoSpeed": 320,
+                                                           "aperture": 5.6}))
+            reader = oiio.ImageInput.open(str(path))
+            try:
+                self.assertAlmostEqual(reader.spec().get_float_attribute("ExposureTime"), 1/32000)
+                self.assertAlmostEqual(reader.spec().get_float_attribute("FNumber"), 5.6, places=5)
+                np.testing.assert_array_equal(reader.spec().getattribute("Exif:ISOSpeedRatings"), [320])
+                np.testing.assert_array_equal(reader.read_image(oiio.UINT16), rgb)
+            finally:
+                reader.close()
+
     def test_cli_from_another_directory(self):
         with tempfile.TemporaryDirectory() as d:
             source = Path(d) / "train.exr"

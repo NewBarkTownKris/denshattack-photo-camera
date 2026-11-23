@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUTF8: "1"
+      CAMERA_TEST_VERSION: 0.2.0-dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,7 +25,7 @@ jobs:
       - name: Install image libraries
         run: python -m pip install -r requirements.txt
       - name: Build the release downloads
-        run: python tools/package_release.py --version 0.1.0 --output dist
+        run: python tools/package_release.py --version ${{ env.CAMERA_TEST_VERSION }} --output dist
       - name: Download and verify the official UE4SS test fixture
         shell: python
         run: |
@@ -36,7 +37,8 @@ jobs:
               assert hashlib.file_digest(stream, "sha256").hexdigest() == "251ad0d1381a241750e036f5918cbf2b5d7ec58ebc608cb2dd09d459d0c81e45"
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               print(f"UE4SS_TEST_ZIP={archive}", file=env)
-              windows_zip = pathlib.Path("dist/DenshattackPhotoCamera-0.1.0-windows.zip").resolve()
+              version = os.environ["CAMERA_TEST_VERSION"]
+              windows_zip = pathlib.Path(f"dist/DenshattackPhotoCamera-{version}-windows.zip").resolve()
               print(f"DENSHATTACK_WINDOWS_ARCHIVE={windows_zip}", file=env)
       - name: Test installers, picker settings and photo exporters
         run: python -m unittest discover -s tests -v

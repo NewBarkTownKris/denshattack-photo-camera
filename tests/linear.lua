@@ -152,3 +152,27 @@ assert(not linear.checkFile(req, 2))
 assert(linear.checkFile(req, 3.1))
 assert(not req.linearJob and linear.checkFile(req))
 os.remove(req.path)
+
+-- The photographic master applies gain once in both writer paths. FLOAT
+-- retains detail even when a bright source multiplied by gain exceeds HALF.
+req.exposure = {mode="Manual", aperture=2.8, seconds=1/125, iso=400,
+                compensation=0.5, meteredEV=8, evError=-0.25, gain=32768}
+local function verifyExposed()
+    local f <close> = assert(io.open(req.path, "rb"))
+    local bytes = f:read("a")
+    assert(bytes:find(attr("aperture","float",string.pack("<f",2.8)),1,true))
+    assert(bytes:find(attr("expTime","float",string.pack("<f",1/125)),1,true))
+    assert(bytes:find(attr("isoSpeed","float",string.pack("<f",400)),1,true))
+    assert(bytes:find(attr("denshExposureMode","string","Manual"),1,true))
+    assert(bytes:find(attr("denshExposureGain","float",string.pack("<f",32768)),1,true))
+    local tail = string.rep(string.pack("<f",16384),width) .. string.rep(string.pack("<f",32768),width)
+        .. string.rep(string.pack("<f",131072),width)
+    assert(bytes:sub(-width*12)==tail)
+end
+assert(linear.capture(s,req))
+assert(not linear.checkFile(req,1)); assert(linear.checkFile(req,3.1)); verifyExposed()
+os.remove(req.path)
+function writer:ExportToDisk(rt,file) mockEXR(file,false,rt.width) end
+actor.destroyed,target.released=false,false
+assert(capture()); verifyExposed(); os.remove(req.path)
+print("Photographic FLOAT EXR gain and metadata match across both render readback paths.")

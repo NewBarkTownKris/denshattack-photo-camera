@@ -10,10 +10,10 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-from PIL import TiffTags
+from PIL import ExifTags, TiffTags
 from PIL.TiffImagePlugin import IFDRational, ImageFileDirectory_v2
 
-from grade import REC709, publish_new_file, read_linear_exr, rgb_to_xyz
+from grade import REC709, publish_new_file, read_photo_exr, rgb_to_xyz
 
 # DNG ColorMatrix1 maps XYZ under CalibrationIlluminant1 (D65) to camera RGB.
 # ForwardMatrix1 maps white-balanced camera RGB to the D50 profile connection
@@ -34,7 +34,7 @@ def signed_rationals(matrix):
     return tuple(IFDRational(round(float(v) * 1_000_000), 1_000_000) for v in matrix.flat)
 
 
-def raw_header(width, height, stops, integer):
+def raw_header(width, height, stops, integer, exif=None):
     bits = 16 if integer else 32
     row_bytes = width * 3 * (bits // 8)
     if row_bytes * height >= 2**32:
@@ -80,6 +80,8 @@ def raw_header(width, height, stops, integer):
         50936: (TiffTags.ASCII, "Virtual Linear Rec.709"),
         50964: (TiffTags.SIGNED_RATIONAL, signed_rationals(forward)),
     }
+    if exif:
+        tags[ExifTags.IFD.Exif] = (TiffTags.LONG, exif)
     for tag, (dtype, value) in tags.items():
         ifd.tagtype[tag] = dtype
         ifd[tag] = value
@@ -89,7 +91,7 @@ def raw_header(width, height, stops, integer):
     return header
 
 
-def write_dng(rgb, destination, *, clip_negative=False, integer=False):
+def write_dng(rgb, destination, *, clip_negative=False, integer=False, exif=None):
     """Write a new DNG, returning (stops above scene white, clipped channel count)."""
     destination = Path(destination)
     if destination.suffix.lower() != ".dng":
@@ -108,7 +110,7 @@ def write_dng(rgb, destination, *, clip_negative=False, integer=False):
     # At least one stop is available above reference white, even in a dim image.
     stops = max(1, math.ceil(math.log2(max(peak, 1.0))))
     height, width = rgb.shape[:2]
-    header = raw_header(width, height, stops, integer)
+    header = raw_header(width, height, stops, integer, exif=exif)
 
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".densh-dng-") as work:
         temporary = Path(work) / "photo.dng"
@@ -140,8 +142,8 @@ def main():
     parser.add_argument("--clip-negative", action="store_true", help="floor negative scene channels at zero")
     args = parser.parse_args()
     try:
-        rgb = read_linear_exr(args.input, assume_rec709=args.assume_rec709)
-        stops, clipped = write_dng(rgb, args.output, clip_negative=args.clip_negative, integer=args.integer)
+        rgb, exif = read_photo_exr(args.input, assume_rec709=args.assume_rec709)
+        stops, clipped = write_dng(rgb, args.output, clip_negative=args.clip_negative, integer=args.integer, exif=exif)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{parser.prog}: {error}\n")
     storage = "16-bit integer" if args.integer else "32-bit float"
