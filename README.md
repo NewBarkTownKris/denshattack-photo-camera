@@ -2,7 +2,7 @@
 
 Freeze the train mid-trick, fly around it, and frame a photograph with a mouse, keyboard, or controller. **F9** saves the game’s look as a PNG. **F3** also saves a scene-linear HDR EXR for grading. The mod targets the Windows Steam build of Denshattack! (`26541226`, Unreal Engine 5.6.1) and runs through UE4SS v4.0.0. Gameplay and capture have been tested on Linux with Proton Experimental.
 
-[Download the latest release](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/latest)
+**Stable v0.1.0** includes the free camera, finder, folder picker, PNG/EXR shutter and offline exporters. The **v0.2.0-dev prerelease** adds metered exposure, Photo Studio, timed captures, film looks, ISO grain and a chromatic aberration switch. Pick the Windows or Linux/Proton ZIP from the version you want and follow the same installation steps below. [Download stable v0.1.0](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.1.0) · [Download the v0.2.0-dev prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.2.0-dev)
 
 ## Windows installation
 
@@ -29,15 +29,33 @@ For either platform the exact loader archive is **UE4SS_v4.0.0.zip**, SHA-256 `2
 
 ## Take a photo
 
-Press **F8** during a run, move the camera, then press **F9** for a game-look PNG. Press **F3** for a PNG and a scene-linear EXR from the same frozen composition. Press **F8** again to restore the gameplay view. If you exit during a write, the camera waits for completion or timeout.
+Press **F8** during a run, move the camera, then press **F9** for a PNG. Press **F3** for a PNG and a scene-linear EXR from the same frozen composition. Press **F8** again to restore the gameplay view. An instant shutter finishes its pending write or reports a timeout before gameplay resumes.
 
-In v0.1.0, the game controls exposure and the aperture dial controls depth of field. Photographic ISO, timed shutters, exposure metering and priority modes are planned. The TIFF export exposure offset fits highlights into the selected log encoding.
+### Photo Studio development build
+
+Press **F4** in photo mode. Use **Up/Down** to select a row and **Left/Right** to change its value, or use the controller D-pad. **F4** closes the panel and restores aiming. A fresh installation starts in **Game** exposure with **Neutral** film, **ISO grain Off** and **Chromatic aberration Game**. Studio also has controls for framing, lenses, focus, depth of field, reticle, grid and the screenshot folder. It remembers your exposure, image treatment and framing preferences between sessions. Focus distance and focus mode belong to the current shot.
+
+| Exposure mode | What you control |
+| --- | --- |
+| Game | The game supplies display exposure. Set aperture for depth of field. With **ISO grain** on, the **Grain ISO** dial sets grain sensitivity from ISO 100–6400 while the game controls brightness. |
+| Manual | Set aperture, exposure time and ISO. The meter shows the difference in stops from its reading. Auto ISO can take over sensitivity. |
+| Aperture Priority | Set the aperture. The camera meters the composition and chooses a shutter time. With Auto ISO it also uses your preferred minimum shutter speed and ISO limits. |
+| Shutter Priority | Set the shutter time. The camera chooses an aperture and can raise Auto ISO within your limits. |
+
+The dials cover **f/1–f/16**, **8 s–1/32000 s** and **ISO 100–6400**. Exposure compensation ranges from −5 to +5 EV in thirds of a stop. With Manual exposure, ISO 200 delivers twice the linear signal of ISO 100 at the same aperture and shutter. The meter samples a small HDR rendering of the selected frame. Its virtual calibration assigns EV100 10 to linear 0.18. Once the meter has a reading, the finder shows a **±3 EV scale** above the image, marked in thirds of a stop. Positive meter error means the camera exposes brighter than its target.
+
+At **1/15 s or slower** in a photographic mode, keep moving the camera after pressing the shutter to build a motion exposure. The finder shows the time remaining, then **Developing photo** while it renders the recorded path. The train stays frozen. Focus, focal length and exposure lock for the shot. **F8** cancels a timed exposure and resumes gameplay. The shutter uses up to 64 camera poses and limits the output long edge to 3840 pixels.
+
+**Film look** offers eleven presets, including Neutral, Chrome slide, Tungsten negative and Silver print. **ISO grain** adds grain to any look, including Neutral. The effective ISO controls its strength and size. The finder and PNG show the creative grade. F3 writes the EXR from scene color, applying the selected photographic exposure once. The TIFF exporter’s highlight-protection offset is a separate development adjustment.
+
+Press **C**, or open **F4 → Chromatic aberration**, to switch between **Game** and **Off**. Choose **Off** to suppress the colored lens fringes along high-contrast edges in the finder and PNG. Choose **Game** to follow the game's treatment. This setting works in every exposure mode and with every film look. The scene-linear EXR is captured upstream of the display effect.
 
 | Input | Action |
 | --- | --- |
 | F1 | Show or hide the controls in the viewfinder |
 | F2 | Open the desktop screenshot folder picker (with the camera launcher) |
 | F3 / F9 | Save PNG + EXR / PNG only |
+| F4 / left stick click | Open or close Photo Studio (development build) |
 | W / S, A / D or left stick | Move forward / back and left / right |
 | E / Q | Rise / descend |
 | Mouse, arrow keys or right stick | Look left, right, up or down |
@@ -48,26 +66,43 @@ In v0.1.0, the game controls exposure and the aperture dial controls depth of fi
 | F5 | Cycle viewport, 3:2, 4:3, 1:1, 16:9, 5:4, 21:9 and 65:24 |
 | F6 | Rotate the selected frame into portrait or landscape |
 | V | Switch the train’s speed lines and radial blur between clean and original |
+| C | Toggle chromatic aberration between Game and Off (development build) |
 | H / G | Toggle the viewfinder / rule-of-thirds grid |
 | R | Cycle optical, square, circle and off |
 | N | Focus once on the first visible collision surface at the center of the frame |
+| T | Toggle continuous center autofocus and focus lock (development build) |
 | J / K | Move the focus plane nearer / farther |
 | L | Switch manual focus between 20% and 1% steps |
 | B | Toggle photographic depth of field |
 | U / I | Open / close the equivalent aperture from f/1 to f/16 |
 | Y | Cycle 1×, 2×, 4× and 8× depth-of-field strength |
 
+The development build also supports **A / Cross** for PNG, **Y / Triangle** for PNG + EXR, and **right stick click** for autofocus. **RB/LB** raises/lowers the camera. Click the left stick and use the D-pad to adjust the Studio controls. Press and release **View / Back** alone to resume. To enter photo mode entirely from the controller, assign **F8** to a spare button, back grip or long press in the game’s Steam Input layout.
+
+With Studio closed and the finder visible, **left-click** fires the PNG shutter and **middle-click** focuses once. The development build supports these wheel controls with Studio closed.
+
+| Scroll up / down | Action |
+| --- | --- |
+| Wheel | Focus farther / nearer using the current **L** step |
+| Shift or Ctrl + wheel | Open / close aperture |
+| Alt + wheel | Faster / slower shutter |
+| Ctrl + Alt + wheel | Higher / lower manual ISO |
+
+The selected exposure mode determines which exposure dials you can turn. For example, Aperture Priority chooses shutter speed, and Auto ISO chooses sensitivity.
+
 Mouse look is active as soon as you enter photo mode. Push the right stick up or move the mouse up to raise the camera's aim. Both slow down on longer lenses for fine framing. Partial stick travel gives slower movement or aiming. For analog sticks with Steam Input, use a Gamepad layout with each stick mapped to its corresponding joystick. **E/Q** controls vertical movement and **F8** enters and exits photo mode.
 
 Photo mode hides the train’s speed lines and bypasses its speed-driven radial blur when those materials are available. **V** restores the look at the instant of the freeze for an action shot. Leaving photo mode restores the original values. The game’s saved graphics settings are preserved.
 
-To isolate the train, choose a longer lens with **F7**, center the subject and tap **N**. Focus stays at that distance as you reframe. A missed autofocus attempt keeps the previous distance. **J** or **K** engages manual focus. Try **U** to open the aperture or **Y** for stronger blur. Aperture here changes the depth-of-field effect independently of the game’s exposure. The finder and its guides are hidden for the saved PNG.
+To isolate the train, choose a longer lens with **F7**, center the subject and tap **N**. Focus stays at that distance as you reframe. A missed autofocus attempt keeps the previous distance. **J** or **K** engages manual focus. Try **U** to open the aperture or **Y** for stronger blur. In Game exposure, aperture changes depth of field and preserves the game’s brightness. In the photographic modes it also participates in the exposure calculation.
+
+In the development finder, **T** enables **AF-C** to keep focusing on the center target while you move. Press **T** again to lock the current distance. With photographic DOF on, the finder reports the distance to the center target and whether to focus nearer or farther. **Aligned** indicates that the target falls within the lens’s sharpness tolerance. An empty center target holds the last focus plane.
 
 The optical finder marks the corners of the active crop and puts a broken ring and focus brackets around its center. The square finder shows open brackets, and the circle finder shows two rings. Press **R** to cycle them. The thirds grid works with any reticle. Guides and readouts stay out of both saved images.
 
 ### Choose where to save
 
-With the camera launcher running, press **F2** in photo mode and select a folder on your desktop. The next shutter press uses it. PNG, EXR and developed companions stay together. The choice persists between sessions.
+With the camera launcher running, press **F2** in photo mode and select a folder on your desktop. On the development branch you can also select **Screenshot folder** in Studio and press **Left** or **Right** to open the picker. The next shutter press uses the selected folder. PNG, EXR and developed companions stay together. The choice persists between sessions.
 
 On Windows, choose a folder on a local drive. To open the picker directly from the extracted release, run `py -3 windows/photo_camera.py choose`. On Linux, run `python3 tools/photo_directory.py`. To print the current location, run `python3 tools/photo_directory.py --show` (Windows: `py -3 tools/photo_directory.py --show`).
 
@@ -79,7 +114,7 @@ The 4K playtest on **9-2-B To the Moon** captured three PNGs from one frozen cam
 
 ## Develop a grading shot
 
-The **F3** shutter saves an opaque, three-channel, half-float EXR tagged with linear Rec.709/D65 primaries. Allow about 50 MB for a 3840 × 2160 master. The separate HDR view uses the detached camera’s pose and projection. Both log TIFFs are developed from this scene color before the final tone map and display grade. Colors authored into textures, materials, lighting and emissives are already present. Bloom, outlines, photographic depth of field and some particles can look different in the companion PNG. Both files use the selected frame. The PNG remains available if the EXR write fails.
+The **F3** shutter saves an opaque, three-channel EXR with linear Rec.709 primaries and a D65 white point. Game mode uses 16-bit floating point. The development build uses 32-bit floating point in photographic modes to preserve the exposure-adjusted highlights, and writes aperture, ISO and shutter metadata. Allow about 50 MB or 100 MB, respectively, for a 3840 × 2160 master. The separate HDR view uses the detached camera’s pose and projection. Both log TIFFs are developed from this scene color before the final tone map and display grade. Colors authored into textures, materials, lighting and emissives are already present. Bloom, outlines, photographic depth of field and some particles can look different in the companion PNG. Both files use the selected frame. The PNG remains available if the EXR write fails.
 
 Wait for **PNG + EXR saved** in the finder. At 4K, the 65:24 preset produces a 3835 × 1416 pair. The camera renders a few extra columns for GPU readback and removes them before saving the EXR. If Unreal’s image writer produces no file, the camera reads the HDR pixels directly in strips.
 
@@ -124,6 +159,6 @@ Close the game. On Windows, run `py -3 windows/photo_camera.py remove` from the 
 
 ## Development
 
-Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build both download archives and the checksum manifest with `python3 tools/package_release.py --version 0.1.0 --output dist`.
+Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build both development archives and the checksum manifest with `python3 tools/package_release.py --version 0.2.0-dev --output dist/0.2.0-dev`. The implementation plan tracks remaining reference features and validation work. [Implementation plan for this prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/blob/v0.2.0-dev/IMPLEMENTATION_PLAN.md)
 
 The viewfinder and photographic controls were inspired by technicallyalex’s [VHOLUME Photo Camera](https://github.com/technicallyalex/vholume-photo-camera). This independent fan mod is distributed under the [MIT license](LICENSE).

@@ -52,6 +52,8 @@ local imagePath = os.tmpname()
 local messages = {}
 local finderShown, finderClosed, lastDisplay, rejectShutter
 local exrCalls, exrSaves = 0, 0
+local exposureShot = {mode="Game", iso=100}
+local motionSteps, motionCancelled, motionRequest = 0, 0, nil
 local pickerRequests, pickerError, displayDir = 0, nil, nil
 local finder = {
     reticles = {"optical", "square", "circle", "off"},
@@ -96,6 +98,22 @@ local env = setmetatable({
         if path:match("unreal.lua$") then return ue end
         if path:match("input.lua$") then return input end
         if path:match("finder.lua$") then return finder end
+        if path:match("exposure.lua$") then return {
+            tick=function() end, close=function() return true end,
+            snapshot=function() return exposureShot end, prepareShot=function() return exposureShot end,
+            status=function() return "" end,
+            options=function() return {} end,
+        } end
+        if path:match("motion.lua$") then return {
+            start=function(_, r)
+                assert(not finderShown and r.exposure == r.linear.exposure)
+                r.motionJob = {open=true}
+                motionRequest = r
+                return true
+            end,
+            step=function() motionSteps = motionSteps + 1; return motionSteps >= 2, nil, true end,
+            cancel=function(r) motionCancelled = motionCancelled + 1; r.motionJob = nil; return true end,
+        } end
         if path:match("linear.lua$") then return {
             capture=function(_, request)
                 assert(not finderShown and request.filename:match("%.exr$"))
@@ -110,7 +128,7 @@ local env = setmetatable({
             set=function(_, hide) return true, hide and "hidden" or "original" end,
         } end
         if path:match("optics.lua$") then return {
-            status=function() return "DOF off" end, refresh=function() end,
+            status=function() return "DOF off" end, refresh=function() end, track=function() end,
         } end
         return dofile(path)
     end,
@@ -184,4 +202,14 @@ writeHeader(1620, true); clock = 13; tick(0.01, axes); assert(exrCalls == 1 and 
 clock = 13.1; tick(0.01, axes); assert(exrSaves == 1 and closes == 7 and not finderShown)
 assert(table.concat(messages, "\n"):find("Saved " .. requested.linear.displayPath, 1, true))
 os.remove(imagePath)
-print("Passed camera movement, lens, crop, shutter completion, timeout, and session cleanup checks.")
+alive, failLoop = true, false
+exposureShot = {mode="Manual", seconds=1, iso=800, ready=true, gain=2}
+actions.toggle(); actions.gradingCapture()
+clock = 20; tick(0.01, axes); clock = 20.1; tick(0.01, axes)
+assert(motionRequest and finderShown and lastDisplay.readout:find("Exposing"))
+local beforeMoves = rolls
+clock = 20.2; tick(0.01, axes); clock = 20.3; tick(0.01, axes)
+assert(rolls == beforeMoves + 2 and motionSteps == 2 and motionCancelled == 1 and finderShown)
+actions.gradingCapture(); clock = 21; tick(0.01, axes); clock = 21.1; tick(0.01, axes)
+actions.toggle(); assert(motionCancelled == 2)
+print("Passed camera movement, optics, crop, short and timed shutter, cancellation and session cleanup checks.")

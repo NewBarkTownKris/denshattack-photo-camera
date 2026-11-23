@@ -3,12 +3,13 @@ local gamepad = dofile(folder .. "gamepad.lua")
 local mouselook = dofile(folder .. "mouselook.lua")
 local input = {}
 local active
+local actions
 
 local bindings = {
-    help = "F1", directory = "F2", gradingCapture = "F3",
+    help = "F1", directory = "F2", gradingCapture = "F3", studio = "F4",
     frame = "F5", portrait = "F6", lens = "F7",
     toggle = "F8", capture = "F9", level = "F10",
-    finder = "H", grid = "G", reticle = "R", lines = "V", dof = "B", autofocus = "N",
+    finder = "H", grid = "G", reticle = "R", lines = "V", chromatic = "C", dof = "B", autofocus = "N", tracking = "T",
     nearer = "J", farther = "K", fineFocus = "L", wider = "U", narrower = "I", strength = "Y",
 }
 
@@ -32,7 +33,82 @@ local function axis(controller, positive, negative)
     return (held(controller, positive) and 1 or 0) - (held(controller, negative) and 1 or 0)
 end
 
-local function cameraAxes(pc, readMouse, now)
+local padButtons = {
+    {"Gamepad_FaceButton_Bottom", "capture"}, {"Gamepad_FaceButton_Top", "gradingCapture"},
+    {"Gamepad_RightThumbstick", "autofocus"}, {"Gamepad_LeftThumbstick", "studio"},
+}
+
+local function buttonDown(pc, name)
+    local ok, value = pcall(held, pc, name)
+    if ok and type(value) == "boolean" then return value end
+end
+
+local function padAxis(pc, positive, negative)
+    return (buttonDown(pc, positive) and 1 or 0) - (buttonDown(pc, negative) and 1 or 0)
+end
+
+-- Poll these only on the photo loop. Seed each button from the current
+-- state so that holding a gameplay button across F8 cannot trip the shutter.
+local function padShortcut(pc, state)
+    local pressed, edges, otherHeld = nil, 0, false
+    for _, binding in ipairs(padButtons) do
+        local name, action = binding[1], binding[2]
+        local down = buttonDown(pc, name)
+        if down then
+            otherHeld = true
+            if state[name] == false then
+                pressed, edges = action, edges + 1
+            end
+        end
+        state[name] = down
+    end
+    local back, previous = buttonDown(pc, "Gamepad_Special_Left"), state.back
+    if back or previous then
+        otherHeld = otherHeld or buttonDown(pc, "Gamepad_LeftShoulder") or buttonDown(pc, "Gamepad_RightShoulder")
+            or buttonDown(pc, "LeftMouseButton") or buttonDown(pc, "MiddleMouseButton")
+    end
+    local resume = back == false and previous == true and state.resumeArmed and not otherHeld
+    if back and previous ~= true then state.resumeArmed = previous == false end
+    if not back or otherHeld then state.resumeArmed = false end
+    state.back = back
+    if resume then return "toggle" end
+    if not back and not previous and edges == 1 then return pressed end
+end
+
+local function mouseShortcut(pc, state, enabled)
+    local left, middle = buttonDown(pc, "LeftMouseButton"), buttonDown(pc, "MiddleMouseButton")
+    local action
+    if enabled and state.finderInput and not state.back then
+        if left and state.left == false and not middle then action = "capture"
+        elseif middle and state.middle == false and not left then action = "autofocus" end
+    end
+    state.left, state.middle, state.finderInput = left, middle, enabled
+    return action
+end
+
+local function pressed(pc, name)
+    return pc:WasInputKeyJustPressed(key(name))
+end
+
+local function wheelDirection(pc, state)
+    local ok, value = pcall(readAnalog, pc, "MouseWheelAxis")
+    local sign = 0
+    if ok and type(value) == "number" and math.abs(value) > 0.01 and math.abs(value) < math.huge then
+        sign = value > 0 and 1 or -1
+    end
+    local previous = state.wheel
+    state.wheel = sign
+    if previous == nil then return 0 end
+    local okUp, up = pcall(pressed, pc, "MouseScrollUp")
+    local okDown, down = pcall(pressed, pc, "MouseScrollDown")
+    if okUp and okDown and up ~= down then return up and 1 or -1 end
+    -- Some builds expose only the analog wheel. A held/stale value must
+    -- not step focus every frame when the mouse is still.
+    if sign ~= previous then return sign end
+    return 0
+end
+
+local function cameraAxes(pc, readMouse, now, editing)
     local speed = 1
     if held(pc, "LeftControl") or held(pc, "RightControl") then
         speed = 0.2
@@ -46,6 +122,12 @@ local function cameraAxes(pc, readMouse, now)
     }
     gamepad.apply(axes, readAnalog, pc)
     axes.mouseYaw, axes.mousePitch = readMouse(now)
+    if editing then
+        axes.menuX = axes.yaw + padAxis(pc, "Gamepad_DPad_Right", "Gamepad_DPad_Left")
+        axes.menuY = -axes.pitch + padAxis(pc, "Gamepad_DPad_Down", "Gamepad_DPad_Up")
+    else
+        axes.up = math.max(-1, math.min(1, axes.up + padAxis(pc, "Gamepad_RightShoulder", "Gamepad_LeftShoulder")))
+    end
     return axes
 end
 
@@ -53,6 +135,7 @@ end
 -- the local player's Unreal input state only while the photo session exists.
 function input.install(callbacks)
     assert(EngineTickAvailable or ProcessEventAvailable, "UE4SS has no game-thread scheduler available")
+    actions = callbacks
     for action, name in pairs(bindings) do
         local invoke = assert(callbacks[action], "Missing photo camera action: " .. action)
         RegisterKeyBind(Key[name], function()
@@ -75,7 +158,7 @@ end
 
 -- tick(seconds, axes) runs even when all axes are neutral. Return false to
 -- stop polling. Errors stop the loop before handing control to onError.
-function input.start(pc, tick, onError)
+function input.start(pc, tick, onError, studioOpen, finderVisible)
     assert(not active, "Photo camera input loop already started")
     assert(pc and pc:IsValid(), "Local player controller is unavailable")
     local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -83,12 +166,41 @@ function input.start(pc, tick, onError)
     local previousTime = clock:GetRealTimeSeconds(pc)
     local readMouse = mouselook.reader(pc, readAnalog)
     local loop = {}
+    local buttons = {}
+    padShortcut(pc, buttons)
+    wheelDirection(pc, buttons)
+    local function clicksEnabled(editing)
+        return not editing and (not finderVisible or finderVisible())
+    end
+    mouseShortcut(pc, buttons, clicksEnabled(studioOpen and studioOpen()))
     local function step()
         assert(pc:IsValid(), "Photo camera player controller expired")
         local now = clock:GetRealTimeSeconds(pc)
         local seconds = math.min(0.1, math.max(0, now - previousTime))
+        local editing = studioOpen and studioOpen()
+        if now ~= previousTime then
+            local action = padShortcut(pc, buttons)
+            local wheel = wheelDirection(pc, buttons)
+            local click = mouseShortcut(pc, buttons, clicksEnabled(editing))
+            if action then
+                actions[action]()
+                if active ~= loop then return false end
+                editing = studioOpen and studioOpen()
+            elseif click then
+                actions[click]()
+            elseif wheel ~= 0 and not editing then
+                local ctrl = held(pc, "LeftControl") or held(pc, "RightControl")
+                local alt = held(pc, "LeftAlt") or held(pc, "RightAlt")
+                local shift = held(pc, "LeftShift") or held(pc, "RightShift")
+                if ctrl and alt then action = wheel > 0 and "isoUp" or "isoDown"
+                elseif alt then action = wheel > 0 and "faster" or "slower"
+                elseif ctrl or shift then action = wheel > 0 and "wider" or "narrower"
+                else action = wheel > 0 and "farther" or "nearer" end
+                actions[action]()
+            end
+        end
         previousTime = now
-        return tick(seconds, cameraAxes(pc, readMouse, now))
+        return tick(seconds, cameraAxes(pc, readMouse, now, editing))
     end
     local function update()
         if active ~= loop then return end

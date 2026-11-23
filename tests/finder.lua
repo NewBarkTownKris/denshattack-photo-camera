@@ -22,7 +22,7 @@ function methods:SetText(value)
 end
 for _, name in ipairs({"SetBrushColor", "SetClipping", "SetPadding", "SetContent", "SetFont",
     "SetColorAndOpacity", "SetAutoWrapText", "SetAutoSize", "SetAlignment", "SetDesiredSizeInViewport",
-    "SetPositionInViewport", "SetZOrder"}) do
+    "SetPositionInViewport", "SetZOrder", "SetHeightOverride", "SetJustification"}) do
     methods[name] = function() end
 end
 
@@ -130,6 +130,29 @@ model.width, model.height, layout.dpi = 500, 300, 1
 model.crop = {x = 0, y = 0, w = 500, h = 300}
 assert(finder.update(handle, model))
 assert(handle.bounds.widthOverride == 500 - 2 * 18 - 24)
+local studio = {summary="f/8    1/125 s    ISO 200", meter="Meter    +0.0 EV",
+    selected=10, key="page", rows={}}
+for i = 1, 10 do studio.rows[i] = {label="Setting " .. i, value=tostring(i), locked=false} end
+model.studio = studio
+assert(finder.update(handle, model))
+local panel = handle.studio
+assert(panel.panel.visibility == 3 and handle.panel.visibility == 2)
+assert(panel.summary.text == studio.summary and panel.meter.text == studio.meter)
+assert(panel.capacity < 10 and panel.items[panel.capacity].value.text == "10")
+assert(panel.items[panel.capacity+1].box.visibility == 1)
+assert(finder.visible(handle, false) and host.visibility == 2)
+studio.selected, studio.key = 1, "page 1"
+assert(finder.update(handle, model))
+assert(panel.items[1].label.text == "Setting 1" and host.visibility == 2)
+model.studio = nil
+assert(finder.update(handle, model) and panel.panel.visibility == 2 and handle.panel.visibility == 3)
+model.meterEV = -1
+assert(finder.update(handle, model) and handle.meter.panel.visibility == 3)
+assert(near(handle.meter.indicator.position.X + 2, handle.meter.halfWidth * 2/3))
+model.meterEV = 5
+assert(finder.update(handle, model) and near(handle.meter.indicator.position.X + 2, 2*handle.meter.halfWidth))
+model.meterEV = nil
+assert(finder.update(handle, model) and handle.meter.panel.visibility == 2)
 assert(finder.close(handle) and not host.attached)
 assert(finder.close(handle))
 rejectAdd = true
