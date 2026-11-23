@@ -23,8 +23,8 @@ def develop(source, formats, args):
     if not pending:
         return 0, kept, False
     try:
-        from grade import read_linear_exr
-        rgb = read_linear_exr(source)
+        from grade import read_photo_exr
+        rgb, exif = read_photo_exr(source)
     except (OSError, ValueError, RuntimeError, ImportError) as error:
         print(f"{source}: {error}", file=sys.stderr)
         return 0, kept, True
@@ -35,13 +35,14 @@ def develop(source, formats, args):
         try:
             if fmt == "dng":
                 from linear_dng import write_dng
-                stops, negative = write_dng(rgb, path, clip_negative=args.clip_negative, integer=args.integer_dng)
+                stops, negative = write_dng(rgb, path, clip_negative=args.clip_negative, integer=args.integer_dng,
+                                            exif=exif)
                 kind = "16-bit integer" if args.integer_dng else "32-bit floating point"
                 detail = f"{kind}, baseline exposure +{stops} EV, {negative} negative channel samples floored"
             else:
                 from grade import highlight_exposure, write_log_tiff
                 ev = args.ev if args.ev is not None else highlight_exposure(rgb, fmt)
-                low, high = write_log_tiff(path, rgb, fmt, exposure=ev)
+                low, high = write_log_tiff(path, rgb, fmt, exposure=ev, exif=exif)
                 detail = (f"{ev:+g} EV encoded, {-ev:+g} EV restores the scene after log decoding, "
                           f"{low} low and {high} high channel samples clipped")
             print(f"Saved {path} ({detail})", flush=True)

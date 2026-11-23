@@ -147,6 +147,8 @@ Run the last command again after taking more shots. Add `--directory "/path/to/o
 | `_flog.tiff` | In Resolve use **Full** data levels, **Fujifilm F-Gamut** and the original **F-Log** curve. |
 | `.dng` | Import the 32-bit floating-point linear RGB negative into a raw editor. The embedded virtual camera profile describes its primaries and white balance. If darktable opens the image dark, add the baseline exposure printed by the exporter. |
 
+When the EXR contains photographic settings, both TIFFs and the DNG carry the shutter speed, f-number, ISO and exposure mode as EXIF metadata.
+
 Each 16-bit TIFF uses the closest whole-stop reduction needed to fit its highlights. The command prints the offset and writes it into the TIFF description. To match the original exposure in Resolve, apply the inverse adjustment in scene-linear space after decoding the log curve. Pass `--ev 0` to develop at the original exposure and see how many channel samples exceed the TIFF range. Use each input transform once. [ARRI LogC3 specification](https://www.arri.com/resource/blob/31918/66f56e6abb6e5b6553929edf9aa7483e/2017-03-alexa-logc-curve-in-vfx-data.pdf) · [Fujifilm F-Log specification](https://dl.fujifilm-x.com/technical-data/F-Log_DataSheet_E_Ver.1.2.pdf)
 
 This product includes DNG technology under license by Adobe.
