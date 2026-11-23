@@ -1,9 +1,11 @@
 local photo = {}
+local spreadWidth, spreadHeight = 89, 35
 
 photo.frames = {
     {name = "Viewport"}, {name = "3:2", 3, 2}, {name = "4:3", 4, 3},
     {name = "1:1", 1, 1}, {name = "16:9", 16, 9}, {name = "5:4", 5, 4},
     {name = "21:9", 21, 9}, {name = "65:24", 65, 24},
+    {name = "Spread 89:35", spreadWidth, spreadHeight},
 }
 photo.lenses = {16, 24, 35, 50, 85, 135, 200, 600}
 photo.maxRenderDimension = 16384 -- Win64 D3D texture dimension limit
@@ -33,7 +35,13 @@ function photo.output(crop, scale, timed)
     local w, h = crop.w, crop.h
     assert(math.tointeger(w) and math.tointeger(h) and w > 0 and h > 0, "Invalid photo dimensions")
     if timed and math.max(w, h) > 3840 then
-        local ratio = 3840 / math.max(w, h)
+        local longEdge, shortEdge = math.max(w, h), math.min(w, h)
+        local cap = 3840
+        -- Fit complete 89:35 units so the magazine's trim dimensions stay exact.
+        if longEdge * spreadHeight == shortEdge * spreadWidth then
+            cap = cap - cap % spreadWidth
+        end
+        local ratio = cap / longEdge
         w, h = math.max(1, math.floor(w*ratio + 0.5)), math.max(1, math.floor(h*ratio + 0.5))
     end
     return {w=w*scale, h=h*scale}

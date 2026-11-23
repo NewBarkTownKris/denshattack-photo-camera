@@ -10,6 +10,7 @@ local exposure = dofile(folder .. "exposure.lua")
 local film = dofile(folder .. "film.lua")
 local studio = dofile(folder .. "studio.lua")
 local motion = dofile(folder .. "motion.lua")
+local shiftPNG = dofile(folder .. "shiftpng.lua")
 local current
 local composition = {}
 
@@ -22,9 +23,12 @@ local function releaseCapture(request)
         local ok, why = photo.cancelPNG(request)
         if not ok then log("PNG cleanup: " .. tostring(why)) end
     end
-    if request and request.motionJob then
+    if request and request.shiftPNGJob then
+        local ok, why = shiftPNG.cancel(request)
+        if not ok then log("PNG cleanup: " .. tostring(why)) end
+    elseif request and request.motionJob then
         local ok, why = motion.cancel(request)
-        if not ok then log("Long exposure cleanup: " .. tostring(why)) end
+        if not ok then log("Shutter cleanup: " .. tostring(why)) end
     elseif request and request.isLinear then
         local ok, why = linear.cancel(request)
         if not ok then log("EXR cleanup: " .. tostring(why)) end
@@ -90,10 +94,11 @@ local function drawFinder(s)
     local meterText = exposure.status(s)
     if meterText and meterText ~= "" then info = info .. "   " .. meterText end
     local timed = s.pending and s.pending.timed
+    local printPNG = s.pending and s.pending.phaseStill
     local printEXR = s.pending and s.pending.isLinear and s.pending.scale > 1
-    local panel = not timed and not printEXR and studio.model(s)
+    local panel = not timed and not printPNG and not printEXR and studio.model(s)
     local reading = exposure.snapshot(s)
-    local meterEV = reading.mode ~= "Game" and not timed and reading.evError or nil
+    local meterEV = reading.mode ~= "Game" and not timed and not printPNG and reading.evError or nil
     local hint = s.notice or "F9 PNG   F3 PNG + EXR   F4 Studio   F2 Folder   F1 Controls"
     if timed then
         local job = s.pending.motionJob
@@ -103,9 +108,14 @@ local function drawFinder(s)
         else
             info, hint = "Developing photo", "F8 cancels"
         end
-    elseif printEXR then
-        info = ("Developing %d × %d EXR"):format(s.pending.output.w, s.pending.output.h)
-        hint = "PNG saved     F8 keeps the PNG and cancels the EXR"
+    elseif printPNG or printEXR then
+        local pending = s.pending
+        local raw = pending.linearJob
+        local rows = raw and (raw.fallbackRow or raw.writeRow) or 0
+        local progress = pending.pixelShiftJob and pending.pixelShiftJob.progress or rows / pending.output.h
+        local stage = printPNG and shiftPNG.progress(pending) or ("EXR   %d%%"):format(math.min(99, math.floor(100 * progress)))
+        info = ("Developing %d × %d %s"):format(pending.output.w, pending.output.h, stage)
+        hint = printPNG and "F8 cancels" or "PNG saved     F8 keeps the PNG and cancels the EXR"
     elseif s.help and not s.notice then
         hint = "WASD / Left stick Move   Mouse / Arrows / Right stick Aim\n"
             .. "E/Q Height   Z/X Roll   F10 Level\n"
@@ -178,6 +188,25 @@ local function sameViewport(session, request)
     return request.viewport.w == w and request.viewport.h == h
 end
 
+local function startLinear(session, request)
+    log("Saved " .. (request.displayPath or request.path))
+    local exr = request.linear
+    if not sameViewport(session, exr) then
+        return completeShot(session, "PNG saved. EXR canceled because the viewport changed")
+    end
+    local ok, reason = linear.capture(session, exr)
+    if not ok then return completeShot(session, "PNG saved. EXR failed: " .. tostring(reason)) end
+    exr.isLinear = true
+    session.pending = exr
+    session.requestTime = ue.time(session)
+    session.nextCheck = session.requestTime
+    if exr.scale > 1 then
+        drawFinder(session)
+        showFinder(session, session.showFinder)
+    end
+    return true
+end
+
 local function update(session, dt, axes)
     if current ~= session then return false end
     local alive, why = ue.alive(session)
@@ -197,30 +226,33 @@ local function update(session, dt, axes)
                 return completeShot(session, "Viewport changed before capture. Reframe and press the shutter again")
             end
             local ok, reason
-            if request.timed then ok, reason = motion.start(session, request, now)
+            if request.phaseStill then ok, reason = shiftPNG.start(session, request)
+            elseif request.timed then ok, reason = motion.start(session, request, now)
             else ok, reason = ue.capture(session, request) end
             if not ok then return completeShot(session, "Shutter failed: " .. tostring(reason)) end
-            if request.timed then
+            if request.timed or request.phaseStill then
                 drawFinder(session)
                 showFinder(session, session.showFinder)
             end
             session.requestTime, session.nextCheck = now, now + 0.1
             return true
         end
-        if request.timed then
+        if request.timed or request.phaseStill then
             if request.motionJob and request.motionJob.open then
                 axes.zoom = 0
                 local pose = photo.move(session.pose, dt, axes)
                 if pose then apply(session, pose) end
             end
-            local done, err, progress = motion.step(session, request, now)
+            local backend = request.phaseStill and shiftPNG or motion
+            local done, err, progress = backend.step(session, request, now)
             if done then
+                if request.phaseStill and request.linear then return startLinear(session, request) end
                 if request.linear then log("Saved " .. (request.linear.displayPath or request.linear.path)) end
                 return completeShot(session, "Saved " .. (request.displayPath or request.path))
             end
             if progress then session.requestTime = now end
             if err or now - session.requestTime > 90 then
-                return completeShot(session, tostring(err or "Timed out developing the long exposure"))
+                return completeShot(session, tostring(err or "Timed out developing the photo"))
             end
             if now >= session.nextDraw then
                 drawFinder(session)
@@ -233,23 +265,10 @@ local function update(session, dt, axes)
         local checkFile = request.isLinear and linear.checkFile or photo.checkFile
         local saved, problem, madeProgress = checkFile(request, now)
         if madeProgress then session.requestTime = now end
-        if saved and request.linear then
-            log("Saved " .. (request.displayPath or request.path))
-            local exr = request.linear
-            if not sameViewport(session, exr) then
-                return completeShot(session, "PNG saved. EXR canceled because the viewport changed")
-            end
-            local ok, reason = linear.capture(session, exr)
-            if not ok then return completeShot(session, "PNG saved. EXR failed: " .. tostring(reason)) end
-            exr.isLinear = true
-            session.pending = exr
-            session.requestTime = ue.time(session)
-            session.nextCheck = session.requestTime
-            if exr.scale > 1 then
-                drawFinder(session)
-                showFinder(session, session.showFinder)
-            end
-            return true
+        if saved and request.linear then return startLinear(session, request) end
+        if request.isLinear and request.scale > 1 and now >= session.nextDraw then
+            drawFinder(session)
+            session.nextDraw = now + 0.25
         end
         -- A 4× PNG has sixteen times the pixels to encode. Only idle time
         -- counts here; a growing file or advancing EXR strip resets the clock.
@@ -281,7 +300,8 @@ end
 
 local function toggle()
     if current then
-        if current.pending and (current.pending.timed or (current.pending.isLinear and current.pending.scale > 1)) then finish(current)
+        if current.pending and (current.pending.timed or current.pending.phaseStill
+                or (current.pending.isLinear and current.pending.scale > 1)) then finish(current)
         elseif current.pending then current.exitRequested = true
         else finish(current) end
         return
@@ -343,10 +363,12 @@ local function capture(session, withLinear)
     end
     request.scale, request.viewport = scale, {w=w, h=h}
     request.output = photo.output(crop, scale, request.timed)
+    -- HighResShot allocates the entire scaled viewport even for a small gate.
+    request.phaseStill = not request.timed and scale > 1 and w * h * scale^2 > 40000000
     if request.linear then
         request.linear.scale, request.linear.viewport, request.linear.output = scale, request.viewport, request.output
     end
-    if scale > 1 and not request.timed then photo.stagePNG(request) end
+    if scale > 1 and not request.timed and not request.phaseStill then photo.stagePNG(request) end
     if displayDir then
         local native = displayDir:match("^%a:\\")
         local prefix = native and (displayDir:gsub("\\+$", "") .. "\\")

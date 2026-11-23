@@ -43,15 +43,30 @@ local function deflate(file,state,raw,last)
     chunk(file,"IDAT",table.concat(blocks))
 end
 
+-- The caller supplies top-down RGB scanlines, each prefixed by filter byte 0.
+function png.begin(file,w,h)
+    assert(file:write(signature))
+    chunk(file,"IHDR",string.pack(">I4I4BBBBB",w,h,8,2,0,0,0))
+    chunk(file,"sRGB","\0")
+    return {width=w,height=h,row=0,adlerA=1,adlerB=0}
+end
+
+function png.writeRows(file,state,raw,rows)
+    assert(rows > 0 and #raw == rows*(1+3*state.width) and state.row+rows <= state.height,
+        "Invalid PNG scanlines")
+    local last = state.row+rows == state.height
+    deflate(file,state,raw,last)
+    if last then chunk(file,"IEND","") end
+    state.row=state.row+rows
+end
+
 function png.step(job,request,band)
     local output = request.output or request.crop
     local w,h = output.w,output.h
     if not job.pngRead then
         local out <close> = assert(io.open(job.recovery,"wb"))
-        assert(out:write(signature))
-        chunk(out,"IHDR",string.pack(">I4I4BBBBB",w,h,8,2,0,0,0))
-        chunk(out,"sRGB","\0")
-        job.pngRead={row=0,adlerA=1,adlerB=0,byte=srgbCache(job.count)}
+        job.pngRead=png.begin(out,w,h)
+        job.pngRead.byte=srgbCache(job.count)
     end
     local state=job.pngRead
     local stop = band and band.first+band.rows or h
@@ -72,10 +87,7 @@ function png.step(job,request,band)
         lines[y]="\0"..table.concat(pixels)
     end
     local out <close> = assert(io.open(job.recovery,"ab"))
-    local last=state.row+rows==h
-    deflate(out,state,table.concat(lines),last)
-    if last then chunk(out,"IEND","") end
-    state.row=state.row+rows
+    png.writeRows(out,state,table.concat(lines),rows)
     return state.row==stop
 end
 

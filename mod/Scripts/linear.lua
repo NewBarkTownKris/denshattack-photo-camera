@@ -3,10 +3,8 @@
 local linear = {}
 local folder = assert(debug.getinfo(1, "S").source:match("^@(.+[/\\])"))
 local fallback = dofile(folder .. "exrfallback.lua")
+local pixelshift = dofile(folder .. "pixelshift.lua")
 local magic = "\118\047\049\001" .. string.pack("<I4", 2)
-local nativePixels = 3840 * 2160
-local bandPixels = 1024 * 1024
-local overlap = 64
 
 local function valid(o)
     return o and o:IsValid()
@@ -209,6 +207,16 @@ function linear.projection(session, crop, library, renderWidth, left, outputWidt
         outputHeight or crop.h, bandY or 0, bandHeight or outputHeight or crop.h)
 end
 
+-- A pass captures every grid-th sample across the full field of view. Its
+-- first texel follows the corresponding output pixel center, even when an
+-- odd raster requires a padded last column or row.
+function linear.phaseProjection(session, crop, library, renderWidth, left, w, h, grid, x, y, phaseWidth, phaseHeight)
+    assert(phaseWidth == math.ceil(w / grid) and phaseHeight == math.ceil(h / grid), "Invalid pixel-shift phase size")
+    local offsetX, offsetY = (x + 0.5) / grid - 0.5, (y + 0.5) / grid - 0.5
+    return bandProjection(gateTangent(session, crop), library, renderWidth, left - offsetX,
+        w / grid, h / grid, offsetY, phaseHeight)
+end
+
 -- UE4SS serializes struct arguments with the exact display spelling of
 -- reflected names. A project's cooked FName casing may differ from the SDK.
 local function structArgs(path, values)
@@ -230,6 +238,7 @@ function linear.writeOptions(format)
 end
 
 function linear.cancel(request)
+    if request and request.pixelShiftJob then return pixelshift.cancel(request) end
     local tx = request and request.linearJob
     if not tx then return true end
     local errors = {}
@@ -245,16 +254,6 @@ function linear.cancel(request)
     if #errors > 0 then return false, table.concat(errors, " / ") end
     request.linearJob = nil
     return true
-end
-
-local function submitBand(tx, firstRow)
-    local start = math.min(math.max(0, firstRow - overlap), tx.height - tx.renderHeight)
-    local matrix, fov = bandProjection(tx.gate, tx.library, tx.renderWidth, tx.left,
-        tx.width, tx.height, start, tx.renderHeight)
-    tx.band = {target=tx.target, left=tx.left, first=firstRow,
-        rows=math.min(tx.bandRows, tx.height-firstRow), sourceY=firstRow-start}
-    tx.component.CustomProjectionMatrix, tx.component.FOVAngle = matrix, fov
-    tx.component:CaptureScene()
 end
 
 local function capture(session, request, supplied, renderWidth, left, samples, divisor, externalBands)
@@ -275,16 +274,9 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
         tx.chroma = colorSpace()
         tx.library = object("/Script/Engine.Default__KismetRenderingLibrary")
         if externalBands then tx.externalBands = true; return end
-        if not supplied and w*h > nativePixels and (w > crop.w or h > crop.h) then
-            -- Keep one strip of the image on the GPU. Overscan on each side
-            -- gives neighboring rows to the renderer before cropping.
-            tx.bandRows = math.max(1, bandPixels // w)
-            tx.renderHeight = math.min(h, tx.bandRows + 2*overlap)
-        else
-            tx.writer = object("/Script/ImageWriteQueue.Default__ImageWriteBlueprintLibrary")
-            tx.options = linear.writeOptions(3)
-            tx.renderHeight = h
-        end
+        tx.writer = object("/Script/ImageWriteQueue.Default__ImageWriteBlueprintLibrary")
+        tx.options = linear.writeOptions(3)
+        tx.renderHeight = h
         -- DX12 staging rows are 256-byte aligned. RGBA16F is eight bytes per
         -- texel, so a 32-texel multiple gives the writer tightly packed rows.
         tx.renderWidth = ((w + 31) // 32) * 32
@@ -312,14 +304,16 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
         tx.target.TargetGamma = 1
         component.bUseCustomProjectionMatrix = true
         component.CaptureSource, component.TextureTarget = 1, tx.target -- SCS_SceneColorHDRNoAlpha
-        if tx.bandRows then
-            tx.component, tx.gate = component, gateTangent(session, crop)
-            submitBand(tx, 0)
+        local matrix, fov
+        if request.phase then
+            local phase = request.phase
+            matrix, fov = linear.phaseProjection(session, crop, tx.library, tx.renderWidth, tx.left,
+                phase.width, phase.height, phase.grid, phase.x, phase.y, w, h)
         else
-            local matrix, fov = linear.projection(session, crop, tx.library, tx.renderWidth, tx.left, w, h)
-            component.FOVAngle, component.CustomProjectionMatrix = fov, matrix
-            component:CaptureScene()
+            matrix, fov = linear.projection(session, crop, tx.library, tx.renderWidth, tx.left, w, h)
         end
+        component.FOVAngle, component.CustomProjectionMatrix = fov, matrix
+        component:CaptureScene()
     end)
     if not ok then
         local _, cleanup = linear.cancel(request)
@@ -329,6 +323,10 @@ local function capture(session, request, supplied, renderWidth, left, samples, d
 end
 
 function linear.capture(session, request)
+    local out = request.output or request.crop
+    if not request.phase and out.w <= 16384 and out.h <= 16384 and not pixelshift.fitsSingleView(out.w, out.h) then
+        return pixelshift.capture(session, request, linear)
+    end
     return capture(session, request)
 end
 
@@ -394,19 +392,13 @@ function linear.finishBands(request)
 end
 
 function linear.checkFile(request, now)
+    if request.pixelShiftJob then return pixelshift.checkFile(request, now) end
     local tx = request.linearJob
     if tx then
         now = now or os.clock()
         local previousRow, previousWrite, previousSize = tx.fallbackRow, tx.writeRow, tx.lastSize
         local ok, err = pcall(function()
             if tx.externalBands then return end
-            if tx.band then
-                if fallback.step(tx, request, rgbHeader, tx.band) then
-                    if tx.fallbackRow == tx.height then publish(request, tx)
-                    else submitBand(tx, tx.fallbackRow) end
-                end
-                return
-            end
             if not tx.submittedAt then
                 -- CaptureScene queues the render. Keep the actor and target
                 -- alive across an engine frame before requesting GPU readback.

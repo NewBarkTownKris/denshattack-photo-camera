@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path, PureWindowsPath
+import signal
 import subprocess
 import sys
 
@@ -41,6 +42,56 @@ def dx12_command(argv):
     return result
 
 
+def run_with_picker(command, picker):
+    # Steam's reaper waits for every child. If it inherits the watcher as a
+    # child, both wait forever. The launcher owns them as siblings instead.
+    game = None
+    watcher = None
+    pending_signal = None
+
+    def forward(signum, frame):
+        nonlocal pending_signal
+        if game is None:
+            pending_signal = signum
+        else:
+            game.send_signal(signum)
+
+    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+    try:
+        game = subprocess.Popen(command)
+        if pending_signal is not None:
+            game.send_signal(pending_signal)
+        try:
+            watcher = subprocess.Popen(
+                [sys.executable, str(picker), "--watch", "--parent-pid", str(game.pid)],
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except OSError as exc:
+            print(f"Could not start the Denshattack photo folder picker: {exc}", file=sys.stderr)
+        status = game.wait()
+        if watcher is not None:
+            # The watcher detects game exit and closes any open native dialog.
+            try:
+                watcher.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                watcher.terminate()
+                try:
+                    watcher.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    watcher.kill()
+                    watcher.wait()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if status < 0:
+        sig = -status
+        if sig not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(sig, signal.SIG_DFL)
+        signal.raise_signal(sig)
+        return 128 + sig
+    return status
+
+
 def main(argv):
     keep_renderer = bool(argv) and argv[0] == "--keep-renderer"
     command = list(argv[1:] if keep_renderer else argv)
@@ -53,17 +104,12 @@ def main(argv):
         if not picker.is_file():  # Running the wrapper directly from the source checkout.
             picker = picker.parent.parent / "tools/photo_directory.py"
         if picker.is_file():
-            try:
-                subprocess.Popen([sys.executable, str(picker), "--watch", "--parent-pid", str(os.getpid())],
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
-            except OSError as exc:
-                print(f"Could not start the Denshattack photo folder picker: {exc}", file=sys.stderr)
+            return run_with_picker(command, picker)
         else:
             print("Missing photo_directory.py. Reinstall the camera mod to use the in-game folder picker.",
                   file=sys.stderr)
-    # Retain the PID, signals and exit status of Steam's original game command.
     os.execvp(command[0], command)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

@@ -198,30 +198,37 @@ assert(linear.capture(s,req))
 assert(not linear.checkFile(req,1)); assert(linear.checkFile(req,3.1)); verifyExposed()
 os.remove(req.path)
 
--- A full 4K viewport shot at 4x should allocate only one overlapping strip.
--- Sample into the second strip, checking crop geometry and cancel cleanup
--- without allocating or writing a full 1.5 GiB print master in this test.
-width, height = 15360, 8640
-req.crop, req.output = {x=0,y=0,w=3840,h=2160}, {w=width,h=height}
-assert(linear.capture(s, req))
-local tx = req.linearJob
-assert(target.SizeX == width and target.SizeY < 256 and tx.band and target.bandStart == 0)
-assert(not tx.writer and not io.open(tx.source,"rb"))
-local expectedRow, color = 0, {R=4,G=1,B=0.5}
-function library:ReadRenderTargetRawPixelArea(_,rt,left,y,w,rows,normalized)
-    assert(rt==target and left==0 and w==width and not normalized)
-    assert(math.abs(target.bandStart+y-expectedRow)<1e-5 and y+rows<=target.SizeY and w*rows<=65536)
-    expectedRow = expectedRow+rows
-    local pixels = {}
-    for i=1,w*rows do pixels[i] = color end
-    return pixels
+-- This 2x magazine spread must render in one view, so directional shadows
+-- crossing the frame cannot change between strips. Stop before readback.
+width, height = 7654, 3010
+req.crop, req.output = {x=6,y=327,w=3827,h=1505}, {w=width,h=height}
+assert(linear.capture(s,req))
+assert(target.SizeY == height and req.linearJob.writer and not req.linearJob.band)
+assert(linear.cancel(req))
+
+-- Pixel-shift views retain the entire gate. Across all phases the first and
+-- last retained texels must hit the high-resolution pixel centers, even
+-- when the final dimension is odd and the phase texture has guard columns.
+local function verifyPhase(w, h, n)
+    local pw, ph = math.ceil(w/n), math.ceil(h/n)
+    local padded = math.ceil(pw/32)*32
+    local left = (padded-pw)//2
+    for py=0,n-1 do for px=0,n-1 do
+        local lib = {CalculateProjectionMatrix=function(_, view) return view end}
+        local view = linear.phaseProjection(s, req.crop, lib, padded, left, w, h, n, px, py, pw, ph)
+        local half = math.tan(math.rad(view.FOV)/2)
+        for _, i in ipairs({0, (w-1-px)//n}) do
+            local actual = (2*(left+i+0.5)/padded-1 + view.OffCenterProjectionOffset.X)*half
+            assert(math.abs(actual - (2*(n*i+px+0.5)/w-1)) < 1e-7)
+        end
+        for _, j in ipairs({0, (h-1-py)//n}) do
+            local actual = (1-2*(j+0.5)/ph + view.OffCenterProjectionOffset.Y)*half/view.AspectRatio
+            assert(math.abs(actual - (h-2*(n*j+py+0.5))/w) < 1e-7)
+        end
+    end end
 end
-while expectedRow <= tx.bandRows do
-    local done, why, advanced = linear.checkFile(req)
-    assert(not done and not why and advanced)
-end
-assert(target.bandStart>0 and target.bandStart<=tx.band.first-64)
-assert(linear.cancel(req) and not io.open(req.path..".partial","rb"))
+verifyPhase(15308, 6020, 2)
+verifyPhase(1001, 1207, 3)
 req.output = {w=16385,h=400}
 assert(not linear.capture(s,req) and not req.linearJob)
 
@@ -263,4 +270,4 @@ do
     end
 end
 os.remove(req.path)
-print("4x EXR dimensions, fixed finder rays, bounded off-axis strips and assembled FLOAT scanlines passed.")
+print("4x EXR dimensions, fixed finder rays, full-gate subpixel phases and assembled FLOAT scanlines passed.")

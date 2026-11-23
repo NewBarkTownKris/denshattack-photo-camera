@@ -44,11 +44,15 @@ Live Proton checks on a frozen composition yielded these results.
 
 Automated tests cover exposure stops, Auto ISO bounds, focus/DOF, cropped metering, timing, cancel/cleanup and settings restoration. [Exposure and Photo Studio](README.md#photo-studio-development-build)
 
-## Print capture in 0.2.0-print.1
+## Print capture builds
 
-The local build adds a saved **Capture scale** dial to Photo Studio. The dial scales both dimensions of the selected frame by 1×, 2×, 3× or 4× for PNG and scene-linear EXR. Composition and metering use the original finder gate. The scaled full viewport for an instant shutter is limited to 16384 pixels per axis. Timed shutters scale their 3840-long-edge maximum base to a maximum of 15360 pixels at 4×.
+**0.2.0-print.1** introduced a saved **Capture scale** dial in Photo Studio. The dial scales both dimensions of the selected frame by 1×, 2×, 3× or 4× for PNG and scene-linear EXR. Composition and metering use the original finder gate. The scaled full viewport for an instant shutter is limited to 16384 pixels per axis. Timed shutters scale their 3840-long-edge maximum base to a maximum of 15360 pixels at 4×.
 
-Validation for this build is offline. A later in-game test should compare fine rail edges at 1× and 4× from the same frozen camera, check alignment of the PNG and EXR in portrait and panoramic frames, and measure capture time and GPU memory at the largest size. The live results above apply to the earlier prerelease. [Print sizing and controls](README.md#capture-for-print-020-print1)
+**0.2.0-print.2** adds the 22.25 × 8.75-inch spread as an exact 89:35 frame. A 2× instant shot from a 4K viewport renders each file in one view. Larger instant shots use pixel shift to keep the full scene in each shadow pass. PNG switches when any scaled capture exceeds 40 megapixels for the full viewport, which occurs at 3× and 4× on a 3840 × 2160 viewport. EXR switches when the padded output target exceeds 33,177,600 pixels. Each phase shifts the projection to sample a different set of output pixel centers. The merge interleaves the sRGB PNG bytes or the scene-linear EXR samples at those locations. Geometry gains sampling density while texture LOD and some post-processing resolve per phase. The PNG uses FinalColorLDR with a persistent view state for the game’s shadows and a plain RGBA8 target at gamma 2.2 to preserve its display codes.
+
+Long shutters still assemble large outputs from overlapping bands, where shadows or screen-space effects can leave visible joins. For a critical spread use Game exposure or a photographic shutter faster than 1/15 s. Offline tests cover odd phase dimensions, pixel values, cancellation, the spread in both orientations and exact trim dimensions at all four scales.
+
+On Proton, one 4× F3 capture produced a 15308 × 6020 PNG/EXR pair. The PNG was ready 50.47 seconds after the shutter and the pair finished in 79.33 seconds. Comparison with 1× showed higher resolved detail and continuous shadows and clouds at the former band boundaries. The 4× EXR matched its 1× framing and preserved values above scene-linear white. A shaded blue platform averaged RGB (0, 21, 65) in the original viewport PNG and (0, 22, 67) in the 4× print, with no black pixels in the 4× sample. At 7654 × 3010, the native 2× PNG supplies 344 PPI at the spread’s trim dimensions. [Print sizing and controls](README.md#capture-for-print)
 
 ## Differences from the VHOLUME reference
 

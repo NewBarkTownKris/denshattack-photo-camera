@@ -20,6 +20,29 @@ for _, size in ipairs({{3840, 2160}, {3440, 1440}, {1281, 801}}) do
 end
 local panorama = photo.output(photo.crop(3840,2160,65,24), 4, false)
 assert(panorama.w == 15340 and panorama.h == 5664)
+-- Frame indices are saved in Studio. The new magazine frame follows 65:24.
+assert(photo.frames[8].name == "65:24")
+local spreadW, spreadH = photo.frame(9, false)
+assert(spreadW == 89 and spreadH == 35)
+local spread = photo.crop(3840, 2160, spreadW, spreadH)
+assert(spread.x == 6 and spread.y == 327 and spread.w == 3827 and spread.h == 1505)
+for scale = 1, 4 do
+    for _, timed in ipairs({false, true}) do
+        local out = photo.output(spread, scale, timed)
+        assert(out.w / 22.25 == 172 * scale and out.h / 8.75 == 172 * scale)
+    end
+end
+local rotated = photo.crop(3840, 2160, photo.frame(9, true))
+assert(rotated.x == 1500 and rotated.y == 12 and rotated.w == 840 and rotated.h == 2136)
+assert(photo.output(rotated, 4, false).w == 3360 and photo.output(rotated, 4, false).h == 8544)
+for _, portrait in ipairs({false, true}) do
+    local largeSpread = photo.crop(7680, 4320, photo.frame(9, portrait))
+    for scale = 1, 4 do
+        local capped = photo.output(largeSpread, scale, true)
+        assert(capped.w == (portrait and 1505 or 3827) * scale)
+        assert(capped.h == (portrait and 3827 or 1505) * scale)
+    end
+end
 local big = {w=7680, h=4320}
 assert(photo.output(big, 4, true).w == 15360 and photo.output(big, 4, true).h == 8640)
 for _, invalid in ipairs({0, 5, 2.5}) do assert(not pcall(photo.output, big, invalid, true)) end
@@ -116,7 +139,7 @@ local env = setmetatable({
         } end
         if path:match("motion.lua$") then return {
             start=function(_, r)
-                assert(not finderShown and r.exposure == r.linear.exposure)
+                assert(not finderShown and (not r.linear or r.exposure == r.linear.exposure))
                 r.motionJob = {open=true}
                 motionRequest = r
                 return true
@@ -124,9 +147,20 @@ local env = setmetatable({
             step=function() motionSteps = motionSteps + 1; return motionSteps >= 2, nil, true end,
             cancel=function(r) motionCancelled = motionCancelled + 1; r.motionJob = nil; return true end,
         } end
+        if path:match("shiftpng.lua$") then return {
+            start=function(_, r)
+                assert(not finderShown and not r.timed)
+                r.shiftPNGJob = {percent=0}
+                motionRequest = r
+                return true
+            end,
+            progress=function(r) return ("PNG   %d%%"):format(r.shiftPNGJob.percent) end,
+            step=function() motionSteps = motionSteps + 1; return motionSteps >= 2, nil, true end,
+            cancel=function(r) r.shiftPNGJob=nil; return true end,
+        } end
         if path:match("linear.lua$") then return {
             capture=function(_, request)
-                assert(not finderShown and request.filename:match("%.exr$"))
+                assert(request.filename:match("%.exr$") and (not finderShown or motionRequest.phaseStill))
                 exrCalls = exrCalls + 1
                 return true
             end,
@@ -252,5 +286,30 @@ actions.gradingCapture()
 viewWidth = 1918
 clock = 28; tick(0.01, still); clock = 28.1; tick(0.01, still)
 assert(not currentSession.pending and table.concat(messages):find("Viewport changed before capture"))
+
+-- A 4K viewport at 3× or 4× renders one frozen display pose using full-frame pixel shift.
+-- The PNG publishes before starting a separately cancelable RAW companion.
+viewWidth, viewHeight = 3840, 2160
+local nativeCount, moveCount = shutters, rolls
+for _, withRaw in ipairs({false,true}) do
+    if withRaw then exposureShot = {mode="Manual",seconds=1/500,gain=4,ready=true} end
+    motionSteps = 0
+    if withRaw then actions.gradingCapture() else actions.capture() end
+    clock = clock+1; tick(0.01,axes); clock = clock+1; tick(0.01,axes)
+    assert(motionRequest.phaseStill and not motionRequest.timed and not motionRequest.stagedPNG)
+    assert(motionRequest.output.w==15360 and motionRequest.output.h==8640)
+    assert(finderShown and lastDisplay.readout:find("PNG   0%%"))
+    motionRequest.shiftPNGJob.percent=50
+    clock = clock+1; tick(0.01,axes)
+    assert(lastDisplay.readout:find("PNG   50%%"))
+    clock = clock+1; tick(0.01,axes)
+    if withRaw then
+        assert(currentSession.pending==motionRequest.linear and exrCalls==3)
+        assert(motionRequest.linear.exposure.gain==4 and lastDisplay.readout:find("EXR"))
+        currentSession.pending.linearJob={fallbackRow=2160}
+        clock = clock+1; tick(0.01,axes)
+    end
+    assert(not currentSession.pending and shutters==nativeCount and rolls==moveCount)
+end
 actions.toggle()
 print("Passed camera movement, optics, crop, short and timed shutter, cancellation and session cleanup checks.")

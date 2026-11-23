@@ -4,7 +4,7 @@ Freeze the train mid-trick, fly around it, and frame a photograph with a mouse, 
 
 **Stable v0.1.0** includes the free camera, finder, folder picker, PNG/EXR shutter and offline exporters. The **v0.2.0-dev prerelease** adds metered exposure, Photo Studio, timed captures, film looks, ISO grain and a chromatic aberration switch. Pick the Windows or Linux/Proton ZIP from the version you want and follow the same installation steps below. [Download stable v0.1.0](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.1.0) · [Download the v0.2.0-dev prerelease](https://github.com/NewBarkTownKris/denshattack-photo-camera/releases/tag/v0.2.0-dev)
 
-The local **0.2.0-print.1** build adds **F4 → Capture scale** for 1× through 4× print captures. This build has offline test coverage. In-game image quality and GPU memory use at higher scales still need a playtest.
+The local **0.2.0-print.2** build adds **Spread 89:35** for a 22.25 × 8.75-inch magazine spread. It includes the 1× through 4× capture scale introduced in **0.2.0-print.1**.
 
 ## Windows installation
 
@@ -65,7 +65,7 @@ Press **C**, or open **F4 → Chromatic aberration**, to switch between **Game**
 | Hold Ctrl / Shift | Fine movement (0.2×) / fast movement (4×) |
 | `[` / `]` | Narrow / widen the field of view |
 | F7 | Cycle 16, 24, 35, 50, 85, 135, 200 and 600 mm lenses |
-| F5 | Cycle viewport, 3:2, 4:3, 1:1, 16:9, 5:4, 21:9 and 65:24 |
+| F5 | Cycle viewport, 3:2, 4:3, 1:1, 16:9, 5:4, 21:9 and 65:24. The print build also includes Spread 89:35. |
 | F6 | Rotate the selected frame into portrait or landscape |
 | V | Switch the train’s speed lines and radial blur between clean and original |
 | C | Toggle chromatic aberration between Game and Off (development build) |
@@ -102,9 +102,11 @@ In the development finder, **T** enables **AF-C** to keep focusing on the center
 
 The optical finder marks the corners of the active crop and puts a broken ring and focus brackets around its center. The square finder shows open brackets, and the circle finder shows two rings. Press **R** to cycle them. The thirds grid works with any reticle. Guides and readouts stay out of both saved images.
 
-### Capture for print (0.2.0-print.1)
+### Capture for print
 
 In **F4 → Capture scale**, choose **1×, 2×, 3× or 4×** with Left/Right. The row shows the output dimensions for the selected frame and shutter. The choice applies to the **F9** PNG and both files from **F3**. New and older installations start at **1×**, and the mod remembers the selection for your next session. Scaling applies when the shutter fires.
+
+For a **22.25 × 8.75-inch** two-page magazine spread, select **F4 → Frame → Spread 89:35**, or cycle to it with **F5**. Its exact ratio is **89:35** (about **2.54:1**). At a 3840 × 2160 viewport, 2× yields **7654 × 3010 pixels**, or **344 PPI** across the spread. At 4×, **15308 × 6020 pixels** give **688 PPI**. A 300 PPI delivery at these dimensions is **6675 × 2625 pixels**.
 
 A **65:24** composition on a **3840 × 2160** viewport gives these print sizes.
 
@@ -119,7 +121,13 @@ To size for a magazine layout, multiply the placed width and height in inches, i
 
 For an instant capture, each dimension of the full viewport multiplied by the scale must fit within **16384 pixels**, including when the saved frame uses only part of the view. Timed exposures scale their 1× frame up to a **15360-pixel** long edge at 4×. Available GPU memory can limit what your system can render.
 
-Large EXRs and timed shots render in overlapping horizontal bands. The overlap gives edge filters neighboring pixels. Wide bloom, screen-space effects and animation may still vary between bands. During a scaled instant F3 shot, the finder shows **Developing EXR** after the PNG is saved. **F8** then keeps the PNG and cancels the EXR.
+For a sharp magazine spread, use **Game** exposure or a photographic shutter faster than **1/15 s**. At 2× on a 4K viewport, each file uses one render of the whole frame. Larger instant shots use **pixel shift**. The camera renders the same view several times, shifting the sample position by a fraction of a pixel each time. Interleaving the samples gives geometry a distinct ray at each output pixel while keeping the entire scene in view for shadows. Post-processing and texture detail can still resolve at the size of each individual render.
+
+The PNG switches to pixel shift when a 2×, 3× or 4× capture takes the full viewport above 40 megapixels. On a 3840 × 2160 viewport this happens at 3× and 4×. The PNG uses Unreal’s *FinalColorLDR* with a persistent rendering state for shadows. A plain RGBA8 render target at gamma 2.2 retains the game’s display-encoded color values. An instant EXR switches when the cropped render target, including alignment padding, exceeds 7680 × 4320 pixels in area (about 33 megapixels). After **F3** saves the PNG, the finder reports EXR progress. **F8** at that point keeps the PNG and cancels the EXR.
+
+Large **timed exposures** render the recorded motion in overlapping horizontal bands. Directional shadows, bloom and other screen-space effects can leave visible joins in those images.
+
+In a Proton test of the magazine spread, a 4× **F3** shot saved the **15308 × 6020** PNG after **50 seconds** and the matching EXR after **79 seconds**. Both showed finer detail than an enlarged 1× shot, with continuous shadows and clouds across the spread. The EXR matched the 1× EXR framing and retained values above scene-linear white. A shaded blue platform averaged RGB **(0, 21, 65)** in the 1× viewport PNG and **(0, 22, 67)** in the 4× PNG. The native **2× PNG** provides **344 PPI** across the same spread.
 
 ### Choose where to save
 
@@ -182,6 +190,6 @@ Close the game. On Windows, run `py -3 windows/photo_camera.py remove` from the 
 
 ## Development
 
-Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build the local Windows and Linux/Proton print archives and their checksum manifest with `python3 tools/package_release.py --version 0.2.0-print.1 --output dist/0.2.0-print.1`.
+Run the Lua suites with `for t in tests/*.lua; do lua5.4 "$t" || exit 1; done` on Linux. With the export requirements installed, run `python3 -m unittest discover -s tests`. Build the local Windows and Linux/Proton print archives and their checksum manifest with `python3 tools/package_release.py --version 0.2.0-print.2 --output dist/0.2.0-print.2`.
 
 The viewfinder and photographic controls were inspired by technicallyalex’s [VHOLUME Photo Camera](https://github.com/technicallyalex/vholume-photo-camera). This independent fan mod is distributed under the [MIT license](LICENSE).
