@@ -11,7 +11,7 @@ import tempfile
 import numpy as np
 import OpenEXR
 from PIL import ExifTags, TiffTags
-from PIL.TiffImagePlugin import IFDRational, ImageFileDirectory_v2
+from PIL.TiffImagePlugin import IFDRational
 
 
 D65 = (0.3127, 0.3290)
@@ -139,6 +139,31 @@ def publish_new_file(staged: Path, destination: Path):
         os.link(staged, destination)
 
 
+def _capture_directory(tags, order, offset, count, entry, pointer):
+    # Each supported photograph field is one SHORT or one unsigned RATIONAL.
+    # Classic TIFF stores rationals after the directory. In BigTIFF each
+    # entry has room for all eight bytes, including with older Pillow versions.
+    fields = [(int(ExifTags.Base.ExifVersion), TiffTags.UNDEFINED, 4, b"0232")]
+    for tag, value in tags.items():
+        if isinstance(value, IFDRational):
+            data = struct.pack(order + "II", value.numerator, value.denominator)
+            fields.append((tag, TiffTags.RATIONAL, 1, data))
+        else:
+            fields.append((tag, TiffTags.SHORT, 1, struct.pack(order + "H", value)))
+    entries = bytearray(count.pack(len(fields)))
+    values = bytearray()
+    start = offset + count.size + entry.size * len(fields) + pointer.size
+    for tag, dtype, length, data in sorted(fields):
+        if len(data) > pointer.size:
+            address = start + len(values)
+            if address >= 1 << (8 * pointer.size):
+                raise ValueError("EXIF directory exceeds the TIFF offset limit")
+            values.extend(data)
+            data = pointer.pack(address)
+        entries.extend(entry.pack(tag, dtype, length, data))
+    return entries + pointer.pack(0) + values
+
+
 def write_tiff_exif(path, tags):
     """Install the photographic ExifIFD in our newly authored TIFF, before publication."""
     # OpenImageIO's TIFF writer explicitly skips PhotographicSensitivity (34855).
@@ -149,10 +174,10 @@ def write_tiff_exif(path, tags):
         order = {"II": "<", "MM": ">"}[header[:2].decode("ascii")]
         big = struct.unpack_from(order + "H", header, 2)[0] == 43
         entry = struct.Struct(order + ("HHQ8s" if big else "HHI4s"))
-        size = struct.Struct(order + ("Q" if big else "H"))
+        count_size = struct.Struct(order + ("Q" if big else "H"))
         pointer = struct.Struct(order + ("Q" if big else "I"))
         stream.seek(pointer.unpack_from(header, 8 if big else 4)[0])
-        count, = size.unpack(stream.read(size.size))
+        count, = count_size.unpack(stream.read(count_size.size))
         for _ in range(count):
             tag, dtype, length, _ = entry.unpack(stream.read(entry.size))
             if tag == ExifTags.IFD.Exif and length == 1:
@@ -167,13 +192,11 @@ def write_tiff_exif(path, tags):
         offset = end + (-end % align)
         if offset >= 1 << (8 * address.size):
             raise ValueError("EXIF directory exceeds the TIFF offset limit")
-        directory = ImageFileDirectory_v2(header if big else header[:8], group=ExifTags.IFD.Exif)
-        directory.tagtype[ExifTags.Base.ExifVersion] = TiffTags.UNDEFINED
-        directory[ExifTags.Base.ExifVersion] = b"0232"
-        for tag, value in tags.items():
-            directory[tag] = value
+        directory = _capture_directory(tags, order, offset, count_size, entry, pointer)
+        if offset + len(directory) >= 1 << (8 * pointer.size):
+            raise ValueError("EXIF directory exceeds the TIFF offset limit")
         stream.write(bytes(offset - end))
-        stream.write(directory.tobytes(offset))
+        stream.write(directory)
         stream.seek(location)
         stream.write(address.pack(offset))
 
