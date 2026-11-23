@@ -14,6 +14,7 @@ function trace:LineTraceSingle(context, start, finish, channel, complex, ignore,
     near(finish.x, start.x)
     near(finish.Y - start.Y, 1000000 * math.cos(math.rad(30)))
     near(finish.z - start.z, 500000)
+    if self.unavailable then error("trace unavailable") end
     hit.distance = self.distance
     return self.distance ~= nil
 end
@@ -43,6 +44,8 @@ local s = {camera = camera, world = world, pawn = train, lens = {PostProcessSett
     pose = {x = -203000, y = 40, z = 120, pitch = 30, yaw = 90, roll = 70, fov = 45}}
 
 assert(optics.status(s):find("Photo DOF off"))
+optics.track(s, 0)
+assert(trace.calls == 0, "idle camera traced while photo DOF was off")
 assert(optics.autofocus(s):find("no focusable surface"))
 assert(not s.optics.enabled and properties.DepthOfFieldFocalDistance == 73)
 trace.distance = 123.45
@@ -96,4 +99,81 @@ trace.distance = 1
 optics.autofocus(s)
 assert(pp.DepthOfFieldFocalDistance > 36 / (20 * math.tan(math.rad(s.pose.fov) / 2)))
 assert(pp.DepthOfFieldFstop == 4 and pp.CameraISO == 250 and pp.AutoExposureBias == -1)
+
+assert(optics.toggleTracking(s):find("AF%-C"))
+trace.distance = 500
+optics.track(s, 1)
+near(pp.DepthOfFieldFocalDistance, 500)
+assert(optics.status(s):find("Subject 5.00 m | Aligned", 1, true))
+trace.distance = 700
+local calls = trace.calls
+optics.track(s, 1.10)
+assert(trace.calls == calls and pp.DepthOfFieldFocalDistance == 500)
+optics.track(s, 1.125)
+near(pp.DepthOfFieldFocalDistance, 700)
+trace.distance = nil
+optics.track(s, 1.25)
+assert(optics.status(s):find("No center target") and pp.DepthOfFieldFocalDistance == 700)
+
+-- Refocus at the shutter even if the previous sample is very recent;
+-- once capture is pending, every camera pose uses that same plane.
+trace.distance = 900
+optics.track(s, 1.26, true)
+near(pp.DepthOfFieldFocalDistance, 900)
+s.pending = {timed=true}
+trace.distance = 1100
+calls = trace.calls
+optics.track(s, 2)
+optics.track(s, 2, true)
+assert(trace.calls == calls and pp.DepthOfFieldFocalDistance == 900)
+s.pending = nil
+assert(optics.toggleTracking(s):find("AF lock"))
+optics.track(s, 2)
+assert(optics.status(s):find("Focus farther") and pp.DepthOfFieldFocalDistance == 900)
+trace.distance = 800
+optics.track(s, 2.15)
+assert(optics.status(s):find("Focus nearer") and pp.DepthOfFieldFocalDistance == 900)
+
+-- The same focus error is sharp on a wide-angle lens and visibly blurred
+-- on the telephoto. A stronger DOF effect also narrows the aligned region.
+s.pose.fov = 60
+optics.refresh(s)
+assert(optics.status(s):find("Aligned"))
+trace.distance = 520
+optics.track(s, 2.30)
+assert(optics.status(s):find("Aligned"))
+assert(optics.setStrength(s,4):find("Focus nearer"))
+assert(optics.setStrength(s,1):find("Aligned"))
+assert(not pcall(optics.setStrength, s, 0))
+
+optics.toggleTracking(s)
+optics.manual(s, 1, true)
+trace.distance = 450
+optics.track(s, 2.50)
+near(pp.DepthOfFieldFocalDistance, 909)
+assert(s.optics.mode == "Manual" and s.optics.subject == 450)
+optics.toggleTracking(s)
+assert(optics.autofocus(s):find("AF lock"))
+trace.distance = 300
+optics.track(s, 2.75)
+near(pp.DepthOfFieldFocalDistance, 450)
+
+-- A transient trace or reflected lens write failure cannot close photo mode.
+optics.toggleTracking(s)
+trace.unavailable = true
+optics.track(s, 3)
+assert(optics.status(s):find("Focus range unavailable"))
+trace.unavailable = false
+calls = trace.calls
+optics.track(s, 4.90)
+assert(trace.calls == calls and pp.DepthOfFieldFocalDistance == 450)
+failNextDistance = true
+optics.track(s, 5)
+assert(optics.status(s):find("Focus adjustment unavailable") and pp.DepthOfFieldFocalDistance == 450)
+optics.track(s, 7)
+assert(optics.status(s):find("Aligned") and pp.DepthOfFieldFocalDistance == 300)
+optics.toggle(s)
+calls = trace.calls
+optics.track(s, 8)
+assert(trace.calls == calls and pp.DepthOfFieldFocalDistance == 73)
 print("Photo optics checks passed")

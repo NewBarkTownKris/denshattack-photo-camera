@@ -34,11 +34,12 @@ function fallback.step(tx, request, rgbHeader)
     local w, h = request.crop.w, request.crop.h
     local left = tx.left or 0
     if tx.fallbackRow == nil then
-        local hdr = rgbHeader(w, h, tx.chroma)
+        local hdr = rgbHeader(w, h, tx.chroma, tx.exposure, tx.samples)
         local out <close> = assert(io.open(tx.partial, "wb"))
         assert(out:write(hdr))
         local first = #hdr + h * 8
-        for y = 0, h - 1 do assert(out:write(string.pack("<I8", first + y * (8 + 6 * w)))) end
+        local stride = 8 + w * (tx.exposure and 12 or 6)
+        for y = 0, h - 1 do assert(out:write(string.pack("<I8", first + y * stride))) end
         assert(out:flush())
         tx.fallbackRow = 0
     end
@@ -55,15 +56,22 @@ function fallback.step(tx, request, rgbHeader)
     assert(type(sample.R) == "number", "Could not read the reflected LinearColor")
     local out <close> = assert(io.open(tx.partial, "ab"))
     local blue, green, red = {}, {}, {}
+    local encode = half
+    if tx.exposure then
+        encode = function(v)
+            assert(v == v and math.abs(v) < math.huge, "Invalid scene color in EXR readback")
+            return string.pack("<f", v * tx.gain)
+        end
+    end
     local index = 1
     for y = first, first + rows - 1 do
         for x = 1, w do
             local pixel = colors[index]
             if unwrap then pixel = pixel:get() end
-            blue[x], green[x], red[x] = half(pixel.B), half(pixel.G), half(pixel.R)
+            blue[x], green[x], red[x] = encode(pixel.B), encode(pixel.G), encode(pixel.R)
             index = index + 1
         end
-        assert(out:write(string.pack("<i4I4", y, 6 * w),
+        assert(out:write(string.pack("<i4I4", y, (tx.exposure and 12 or 6) * w),
             table.concat(blue), table.concat(green), table.concat(red)))
     end
     assert(out:flush())
