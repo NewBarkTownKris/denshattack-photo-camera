@@ -253,6 +253,13 @@ def publish(mods):
     with tempfile.TemporaryDirectory(dir=mods.parent, prefix=".photo-camera-") as temp:
         stage = Path(temp) / MOD
         write_package(stage)
+        if had_previous:
+            files = [p.relative_to(stage) for p in stage.rglob("*") if p.is_file()]
+            current_scripts = {p.name for p in (target / "Scripts").glob("*.lua")}
+            packaged_scripts = {p.name for p in (stage / "Scripts").glob("*.lua")}
+            if (current_scripts == packaged_scripts
+                    and all((target / p).is_file() and digest(target / p) == digest(stage / p) for p in files)):
+                return target
         old = backup(target, mods.parent) if had_previous else None
         try:
             stage.rename(target)

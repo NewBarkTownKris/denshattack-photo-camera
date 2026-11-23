@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -22,7 +24,7 @@ class WindowsInstallTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.work = Path(temp.name)
+        self.work = Path(temp.name).resolve()
         self.game = self.work / "Steam Library/電車 Denshattack!"
         self.bin = self.game / camera.BIN
         self.bin.mkdir(parents=True)
@@ -53,6 +55,9 @@ class WindowsInstallTests(unittest.TestCase):
             self.assertTrue((self.mod / "windows/Launch-Camera.cmd").is_file())
             self.assertEqual((self.root / "Mods/mods.txt").read_bytes(), b"")
             self.assertFalse((self.bin / "unexpected").exists())
+            self.run_cli("install")
+            self.assertFalse((self.root / (camera.MOD + "-backups")).exists())
+            (self.mod / "Scripts/main.lua").write_text("-- old managed version")
             (self.mod / "previous local note").touch()
             self.run_cli("install")
             self.assertEqual(len(list((self.root / (camera.MOD + "-backups")).glob("*/previous local note"))), 1)
@@ -83,6 +88,56 @@ class WindowsInstallTests(unittest.TestCase):
             self.assertEqual((self.mod / "original").read_text(), "user-owned")
 
     @unittest.skipUnless(sys.platform == "win32", "requires native Win32")
+    def test_f2_watcher_lifetime_and_request(self):
+        # Exercise real Win32 handles and the subprocess boundary without
+        # opening Steam, a physical game, or a modal dialog on the build host.
+        saved = self.work / "Saved"
+        called = self.work / "called"
+        (self.work / "photo_camera.py").write_text(
+            "from pathlib import Path\nimport sys,time\n"
+            "assert sys.argv[1:] == ['choose']\n"
+            "Path(__file__).with_name('called').open('ab').write(b'1')\ntime.sleep(15)\n")
+        errors = []
+        def launch():
+            try:
+                camera.launch()
+            except Exception as exc:
+                errors.append(exc)
+        def wait_for(predicate):
+            deadline = time.monotonic() + 6
+            while not predicate():
+                if errors:
+                    raise errors[0]
+                if time.monotonic() > deadline:
+                    self.fail("Windows picker watcher timed out")
+                time.sleep(.05)
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                              stdin=subprocess.PIPE) as fake_game:
+            actual_mutex = camera.mutex
+            with mock.patch.object(camera, "game_processes", return_value=[fake_game.pid]), \
+                 mock.patch.object(camera, "mutex", side_effect=lambda name: actual_mutex(name + str(fake_game.pid))), \
+                 mock.patch.object(camera.folders, "DEFAULT_SHOTS", saved / "Screenshots/Windows"), \
+                 mock.patch.object(camera, "HERE", self.work):
+                listener = threading.Thread(target=launch, daemon=True)
+                listener.start()
+                request = saved / "DenshattackPhotoDirectoryPicker.request"
+                ready = saved / "DenshattackPhotoDirectoryPicker.ready"
+                try:
+                    wait_for(ready.exists)
+                    self.assertLess(abs(time.time() - int(ready.read_text())), 10)
+                    request.touch()
+                    wait_for(called.exists)
+                    request.touch()
+                    wait_for(lambda: not request.exists())
+                finally:
+                    fake_game.terminate()
+                    listener.join(6)
+            self.assertFalse(listener.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(called.read_bytes(), b"1")
+            self.assertFalse(ready.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "requires native Win32")
     def test_native_cli_installs_then_picker_updates_exporter_through_a_junction(self):
         archive_path = os.environ.get("DENSHATTACK_WINDOWS_ARCHIVE")
         if archive_path:
@@ -101,8 +156,10 @@ class WindowsInstallTests(unittest.TestCase):
             (self.root / "UE4SS.dll").touch()
         env = dict(os.environ, LOCALAPPDATA=str(self.work / "User Data"), PYTHONUTF8="1")
         def run(script, *args):
-            return subprocess.run([sys.executable, str(script), *map(str, args)], env=env, check=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8").stdout
+            result = subprocess.run([sys.executable, "-X", "utf8", str(script), *map(str, args)], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            return result.stdout
         run(installer, "install", "--game", self.game, *loader_args)
         self.assertTrue((self.mod / "LICENSE").is_file())
         folder = self.work / "Café & 電車"

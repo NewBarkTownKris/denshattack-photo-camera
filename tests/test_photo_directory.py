@@ -56,9 +56,11 @@ class DirectoryDiscoveryTests(unittest.TestCase):
             self.assertFalse(folders._alias_matches(alias, target))
 
     @unittest.skipUnless(sys.platform == "win32", "uses native Windows junctions")
-    def test_windows_picker_and_exporter_share_the_setting(self):
+    def test_windows_picker_preserves_existing_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "Photos & pictures" / "夜景"
+            # Windows TEMP may contain an 8.3 alias. The picker stores full paths.
+            root = Path(tmp).resolve()
+            target = root / "Photos & pictures" / "夜景"
             target.mkdir(parents=True)
             env = {**os.environ, "LOCALAPPDATA": str(Path(tmp) / "Local"), "PYTHONIOENCODING": "utf-8"}
             command = [sys.executable, folders.__file__]
@@ -66,6 +68,24 @@ class DirectoryDiscoveryTests(unittest.TestCase):
             result = subprocess.run([*command, "--show"], env=env,
                                     check=True, capture_output=True, encoding="utf-8")
             self.assertEqual(Path(result.stdout.strip()), target)
+            saved = Path(env["LOCALAPPDATA"]) / "Denshattack_Proto/Saved"
+            config = saved / "DenshattackPhotoDirectory.txt"
+            original = config.read_bytes()
+            original_alias = saved / "DenshattackPhotoFolders" / original.splitlines()[0].decode("ascii")
+            second = root / "Other shots"
+            second.mkdir()
+            foreign_alias = original_alias.parent / folders._key(second)
+            foreign_alias.mkdir()
+            rejected = subprocess.run([*command, "--set", str(second)], env=env,
+                                      capture_output=True, encoding="utf-8")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("another location", rejected.stderr)
+            self.assertEqual(config.read_bytes(), original)
+            self.assertTrue(foreign_alias.is_dir())
+            foreign_alias.rmdir()
+            subprocess.run([*command, "--set", str(second)], env=env, check=True, capture_output=True)
+            (original_alias / "pending.png").write_bytes(b"pending in the original folder")
+            self.assertEqual((target / "pending.png").read_bytes(), b"pending in the original folder")
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux folder picker and watcher")
